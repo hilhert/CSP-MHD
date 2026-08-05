@@ -13,6 +13,20 @@ We propose **CSP (Complex State Propagator)** , a minimalistic recurrent archite
 
 **Key insight:** In standard Mamba, `h → y = Ch → next_h = B(y) = B C h`. The two projections can be fused. Why not just propagate `h` directly?
 
+
+If you find this work useful, please cite it in your paper:
+
+```bibtex
+@article{li2026state,
+  title={State Propagation Also Satisfies: A Complex-Valued State-Space Model for Deterministic State Tracking},
+  author={Li, Xiaohe and Lu, Yang},
+  journal={arXiv preprint arXiv:2608.03425},
+  year={2026}
+}
+```
+
+
+
 ## Architecture
 
 CSP is a minimal recurrent architecture that **only propagates hidden states** across layers, without output projections at intermediate steps.
