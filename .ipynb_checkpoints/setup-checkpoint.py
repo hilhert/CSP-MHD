@@ -4,11 +4,11 @@ setup(
     name="csp",
     version="0.1.0",
     author="Li Xiaohe",
-    author_email="your_email@example.com",
+    author_email="hilhert1987@gmail.com",
     description="Complex State Propagator (CSP) - A complex-valued state-space model for deterministic state tracking",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/CSP",
+    url="https://github.com/hilhert/CSP",
     packages=find_packages(),
     install_requires=[
         "torch>=2.0.0",

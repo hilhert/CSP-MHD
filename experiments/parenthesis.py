@@ -24,7 +24,7 @@ def main():
     
     losses, accs,grad_norms = train_model(
         model, train_loader, test_loader,
-        epochs=300, lr=0.0003, device=device,loss_fn=focal_loss
+        epochs=300, lr=0.0001, device=device,loss_fn=focal_loss
     )
     
     # ★★★ 绘图 ★★★

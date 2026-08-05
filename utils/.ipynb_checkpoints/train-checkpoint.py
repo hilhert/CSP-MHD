@@ -36,7 +36,7 @@ def evaluate_model_f1(model, test_loader, device='cpu'):
     return f1_score(all_targets, all_preds, average='binary')
 
 
-def train_model(model, train_loader, test_loader, epochs=300, lr=0.0003, device='cpu', logger=None，loss_fn=None):
+def train_model(model, train_loader, test_loader, epochs=300, lr=0.0003, device='cpu', logger=None, loss_fn=None):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
     
