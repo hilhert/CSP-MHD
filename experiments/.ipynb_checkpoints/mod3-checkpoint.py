@@ -9,6 +9,14 @@ from utils import (
     setup_logging, plot_training_curves, plot_grokking_analysis
 )
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
+model_path = os.path.join(base_dir, 'mod3')
+fig_path = os.path.join(model_path, 'figure')
+os.makedirs(model_path, exist_ok=True)
+os.makedirs(fig_path, exist_ok=True)
+model_name = "mod3.pt"
+cp_path = os.path.join(model_path,model_name)
+
 
 def main():
     log_file = setup_logging()
@@ -19,17 +27,17 @@ def main():
     X, y = generate_mod3_data(10000, 16)
     train_loader, test_loader = create_dataloaders(X, y, batch_size=64)
     
-    model = CSP(hidden_dim=128, output_dim=2, num_layers=3).to(device)
+    model = CSP(hidden_dim=10, output_dim=2, num_layers=3).to(device)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    losses, accs,grad_norms = train_model(
+    losses, _,accs,grad_norms = train_model(
         model, train_loader, test_loader,
-        epochs=300, lr=0.0003, device=device,loss_fn=focal_loss
+        epochs=300, lr=0.001, weight_decay=1e-4 ,device=device, loss_fn=None,cp_path=cp_path
     )
     
     # ★★★ 绘图 ★★★
-    plot_training_curves(losses, accs)
-    plot_grokking_analysis(accs, grad_norms, losses)
+    plot_training_curves(losses, accs,save_path=fig_path)
+    plot_grokking_analysis(accs, grad_norms, losses,save_path=fig_path)
     
     print(f"Final Acc: {evaluate_model(model, test_loader, device):.4f}")
     print(f"Final F1: {evaluate_model_f1(model, test_loader, device):.4f}")

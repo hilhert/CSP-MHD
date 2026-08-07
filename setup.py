@@ -16,6 +16,7 @@ setup(
         "matplotlib>=3.7.0",
         "tqdm>=4.65.0",
         "scikit-learn>=1.3.0",
+        "safetensors>=0.8.0"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
