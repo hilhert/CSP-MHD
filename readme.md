@@ -52,7 +52,7 @@ Input x (T steps)
   CSP Block L ──► h^(L)
     │
     ▼
-  Phase Decoder (atan2)
+  Phase Decoder (atan2->[cos,sin])
     │
     ▼
   Output y_hat
@@ -87,20 +87,34 @@ z_t ──► Rotate ──► Recur ──┐
 
 | Task | Accuracy | F1 | Epochs to 100% |
 |------|----------|-----|----------------|
-| Parity Check | 100% | 1.0 | ~50 |
+| Parity Check | 100% | 1.0 | ~20 |
 | Mod-3 Counting | 100% | 1.0 | ~60 |
-| Parenthesis Matching | 100% | 1.0 | ~70 |
+| Parenthesis Matching | 100% | 1.0 | ~10 |
 
 ### Grokking Phenomenon
 
-We observe clear **grokking** on Mod-3 Counting and Parenthesis Matching:
-- Mod-3: remains at 33% for 80 epochs, then jumps to 100% in 10 epochs
-- Parenthesis: remains near 50% for 120 epochs, then jumps to 100% in 15 epochs
+We observe clear **grokking** on Parity, Mod-3 Counting and Parenthesis Matching:
+- parity: 
 
 <div align="center">
-  <img src="./experiments/figures/grokking_analysis.png" width="400"/>
-  <img src="./experiments/figures/training_curves.png" width="400"/>
+  <img src="./experiments/parity/figure/grokking_analysis.png" width="400"/>
+  <img src="./experiments/parity/figure/training_curves.png" width="400"/>
 </div>
+
+- Mod-3: 
+
+<div align="center">
+  <img src="./experiments/mod3/figure/grokking_analysis.png" width="400"/>
+  <img src="./experiments/mod3/figure/training_curves.png" width="400"/>
+</div>
+
+- Parenthesis: using f1 score to demostrate grokking, since accuray lost meaning in this problem
+
+<div align="center">
+  <img src="./experiments/parenthesis/figure/grokking_analysis_f1.png" width="400"/>
+  <img src="./experiments/parenthesis/figure/training_curves_f1.png" width="400"/>
+</div>
+
 
 ## Quick Start
 
@@ -130,6 +144,7 @@ jupyter notebook notebooks/demo.ipynb
 - matplotlib>=3.7.0
 - tqdm>=4.65.0
 - scikit-learn>=1.3.0
+- safetensors >=0.8.0
 
 ## License
 
