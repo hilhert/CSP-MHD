@@ -25,7 +25,8 @@ class ComplexPRLayer(nn.Module):
         self.B_proj = nn.Linear(hidden_dim, hidden_dim)
 
         # Decay factor (alpha = exp(log_alpha), initialized to 1)
-        self.log_alpha = nn.Parameter(torch.tensor(0.0))
+        self.delta_proj =  nn.Linear(hidden_dim, 1)
+        self.gamma_proj = nn.Linear(hidden_dim, 1)
 
         # Skip gate (per-dimension, initialized to 0.5)
         self.skip_gate = nn.Parameter(torch.ones(hidden_dim) * 0.5)
@@ -60,16 +61,19 @@ class ComplexPRLayer(nn.Module):
             theta_t = torch.tanh(self.theta_proj(h_real_t)) * math.pi
             cos_t, sin_t = torch.cos(theta_t), torch.sin(theta_t)
 
-            h_real_rot = cos_t * h_real_prev - sin_t * h_imag_prev
-            h_imag_rot = sin_t * h_real_prev + cos_t * h_imag_prev
+            h_real_rot = cos_t * h_real_t - sin_t * h_imag_t
+            h_imag_rot = sin_t * h_real_t + cos_t * h_imag_t
 
-            # 2. Recur: alpha * rotated_state + gamma * input_projection  fix gamma to 1 not learn_able for demostration 
-            alpha = torch.exp(self.log_alpha)
-            B_real_t = self.B_proj(h_real_t)
-            B_imag_t = self.B_proj(h_imag_t)
+            # 2. Recur: alpha * accume_state + gamma * input_projection_after_rotation  
+            delta_t = F.softplus(self.delta_proj(h_real_t+h_real_prev))
+            alpha   = torch.exp(-delta_t) 
+            gamma_t = 1 + torch.sin(self.gamma_proj(h_real_t))
+            
+            B_real_t = self.B_proj(h_real_rot)
+            B_imag_t = self.B_proj(h_imag_rot)
 
-            h_real_new = alpha * h_real_rot + B_real_t
-            h_imag_new = alpha * h_imag_rot + B_imag_t
+            h_real_new = alpha*h_real_prev  + gamma_t*B_real_t
+            h_imag_new = alpha*h_imag_prev  + gamma_t*B_imag_t
 
             outputs_real.append(h_real_new)
             outputs_imag.append(h_imag_new)

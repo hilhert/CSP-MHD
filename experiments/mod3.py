@@ -27,7 +27,7 @@ def main():
     X, y = generate_mod3_data(10000, 16)
     train_loader, test_loader = create_dataloaders(X, y, batch_size=64)
     
-    model = CSP(hidden_dim=10, output_dim=2, num_layers=3).to(device)
+    model = CSP(hidden_dim=32, output_dim=2, num_layers=3).to(device)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     losses, _,accs,grad_norms = train_model(
