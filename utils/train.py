@@ -175,3 +175,106 @@ def train_model(model, train_loader, test_loader, epochs=300,weight_decay=1e-8,l
             log(f"Epoch {epoch:3d} | Loss: {avg_loss:.4f} | Acc: {test_acc:.4f} | F1: {f1:.4f} | GradNorm: {total_norm:.4f} | Best_F1: {best_f1:.4f}")
     
     return train_losses, f1s,test_accs, gradient_norms
+
+def train_epoch_seq(model, dataloader, optimizer, criterion, device):
+    model.train()
+    total_loss = 0
+    for batch in tqdm(dataloader, desc='Training'):
+        input_ids = batch['input_ids'].to(device)
+        output_ids = batch['output_ids'].to(device)
+        out_len = batch['out_len']
+        
+       
+        logits = model(input_ids, output_ids)  # [B, T_out-1, vocab_size]
+        targets = output_ids   # [B, T_out]
+        
+       
+        mask = torch.arange(targets.size(1), device=device).unsqueeze(0) < (out_len - 1).unsqueeze(1)
+        
+        # 计算 loss，只对有效位置
+        loss = criterion(logits.permute(0, 2, 1), targets)  # [B, T_out-1]
+        loss = (loss * mask.float()).sum() / mask.sum()
+        
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(dataloader)
+
+
+def evaluate_seq(model, dataloader, device, pad_idx, eos_idx,debug=True):
+    """
+    评估 seq2seq 模型在字符级任务上的准确率
+    """
+    model.eval()
+    correct = 0
+    total = 0
+    idx2char = dataloader.dataset.idx2char  # ★ 直接从 dataloader 获取
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc='Evaluating')):
+            input_ids = batch['input_ids'].to(device)
+            output_ids = batch['output_ids'].to(device)
+            out_len = batch['out_len']
+            
+            pred_ids = model(input_ids, target_ids=None)
+            
+            for i in range(len(pred_ids)):
+                pred_len = out_len[i]-1
+                pred_tokens = pred_ids[i, :pred_len].tolist()
+                target_tokens = output_ids[i, :out_len[i]].tolist()
+                
+                pred_tokens = [x for x in pred_tokens if x not in [pad_idx, eos_idx]]
+                target_tokens = [x for x in target_tokens if x not in [pad_idx, eos_idx]]
+                
+                pred_str = ''.join(idx2char[x] for x in pred_tokens)
+                target_str = ''.join(idx2char[x] for x in target_tokens)
+                if debug and batch_idx == 0 and i < 5:
+                    input_tokens = batch['input_ids'][i].tolist()
+                    input_tokens = [x for x in input_tokens if x not in [pad_idx, eos_idx]]
+                    input_str = ''.join(idx2char[x] for x in input_tokens)
+                    print(f"[Debug] Input: {input_str}")
+                    print(f"[Debug] Pred : {pred_str}")
+                    print(f"[Debug] Target: {target_str}")
+                    print("-" * 40)
+                
+                if pred_str == target_str:
+                    correct += 1
+                total += 1
+    
+    return correct / total
+
+
+def train_model_seq(model, train_loader, optimizer, criterion, device, pad_idx):
+    """单 epoch 训练"""
+    model.train()
+    total_loss = 0
+    sos_idx = train_loader.dataset.char2idx['<SOS>']
+    for batch in tqdm(train_loader, desc='Training'):
+        input_ids = batch['input_ids'].to(device)
+        output_ids = batch['output_ids'].to(device)
+        out_len = batch['out_len']
+        
+        # ★ 构造 decoder_input：<SOS> + output_ids[:-1]（去掉最后的 <EOS>）
+        
+        sos_tensor = torch.full((input_ids.size(0), 1), sos_idx, device=device, dtype=torch.long)
+        decoder_input = torch.cat([sos_tensor, output_ids[:, :-1]], dim=1)
+        
+        # 目标序列是 output_ids（包含 <EOS>）
+        targets = output_ids
+        
+        logits = model(input_ids, decoder_input)
+        
+        # mask 只覆盖有效位置
+        mask = torch.arange(targets.size(1), device=device).unsqueeze(0) < (out_len).unsqueeze(1)
+        
+        loss = criterion(logits.permute(0, 2, 1), targets)
+        loss = (loss * mask.float()).sum() / mask.sum()
+        
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(train_loader)

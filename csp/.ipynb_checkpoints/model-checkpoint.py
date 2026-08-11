@@ -67,7 +67,7 @@ class ComplexPRLayer(nn.Module):
             # 2. Recur: alpha * accume_state + gamma * input_projection_after_rotation  
             delta_t = F.softplus(self.delta_proj(h_real_t+h_real_prev))
             alpha   = torch.exp(-delta_t) 
-            gamma_t = 1 + torch.sin(self.gamma_proj(h_real_t))
+            gamma_t = (1 + torch.sin(self.gamma_proj(h_real_t)))/2
             
             B_real_t = self.B_proj(h_real_rot)
             B_imag_t = self.B_proj(h_imag_rot)
@@ -144,81 +144,65 @@ class CSP(nn.Module):
         #return self.decoder(warp_unwarp_phase_last)
         return self.decoder(x_dec)
     
-class CSP_EXTEND(nn.Module):
-    """Complete Complex State Propagator model (Full-Channel Cryptographic Edition)."""
-    def __init__(self, vocab_size=2, hidden_dim=10, num_layers=3):
+class CSP_Seq2Seq(nn.Module):
+    def __init__(self, vocab_size, hidden_dim=64, num_layers=3, embed_dim=32):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_dim = hidden_dim
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.encoder_proj = nn.Linear(embed_dim, hidden_dim)
+        self.phase_proj   = nn.Linear(2*hidden_dim,hidden_dim)
+        self.decoder_proj = nn.Linear(hidden_dim, embed_dim)
+        self.layers = nn.ModuleList([ComplexPRLayer(hidden_dim) for _ in range(num_layers)])
+        self.output_proj = nn.Linear(embed_dim, vocab_size)
 
-        # 1. 可学习的词库 Token Embedding (复平面 S1 单位圆上的相位基底)
-        init_angles = torch.linspace(0, 2 * torch.pi, steps=vocab_size + 1)[:-1]
-        init_embeds = torch.stack([torch.cos(init_angles), torch.sin(init_angles)], dim=-1)
-        self.token_embeds = nn.Parameter(init_embeds)  # [vocab_size, 2]
+    def forward(self, input_ids, target_ids=None):
+        B, T_in = input_ids.shape
+        x = self.embedding(input_ids)
+        h = torch.tanh(self.encoder_proj(x))
+        h_real, h_imag = h, torch.zeros_like(h)
 
-        # 2. 升维投影层：将 2D 复数 Token 向量扩展到 hidden_dim 个相位通道
-        self.in_proj_real = nn.Linear(2, hidden_dim)
-        self.in_proj_imag = nn.Linear(2, hidden_dim)
-
-        # 3. 核心 Complex Mamba 演化主干
-        self.layers = nn.ModuleList([
-            ComplexPRLayer(hidden_dim) for _ in range(num_layers)
-        ])
-
-        # 4. 温度放缩因子 (替代显式 Linear 权重)
-        self.logit_scale = nn.Parameter(torch.tensor(5.0))
-
-    def get_token_vectors(self, x_ids):
-        """查表提取 Token 的 2D 归一化复数向量"""
-        normed_embeds = F.normalize(self.token_embeds, p=2, dim=-1) # [vocab_size, 2]
-        return normed_embeds[x_ids]  # [B, T, 2]
-
-    def forward(self, x):
-        """
-        Args:
-            x: [B, T] 或 [B, T, 1] 离散 Token ID (0 或 1)
-        Returns:
-            logits: [B, vocab_size]
-        """
-        if x.dim() == 3 and x.size(-1) == 1:
-            x = x.squeeze(-1)
-        x = x.long()
-
-        # Step 1: 查表提取 Token 的 2D 复数相位向量 [B, T, 2]
-        token_vecs = self.get_token_vectors(x)
-
-        # Step 2: 映射到 hidden_dim 相位通道
-        h_real = torch.tanh(self.in_proj_real(token_vecs))  # [B, T, H]
-        h_imag = torch.tanh(self.in_proj_imag(token_vecs))  # [B, T, H]
-
-        # Step 3: 多层 Complex Mamba 动力学演化
         for layer in self.layers:
             h_real, h_imag = layer(h_real, h_imag)
 
-        # Step 4: 读取最后一个时刻 (T-1) 的隐藏层完整状态 [B, H]
-        real_last = h_real[:, -1, :]  # [B, H]
-        imag_last = h_imag[:, -1, :]  # [B, H]
+        h_real_last = h_real[:, -1, :]
+        h_imag_last = h_imag[:, -1, :]
 
-        # 计算相位相干角，映射回 (cos, sin) 连续 2D 流形，不做任何 mean 压缩！
-        phase = torch.atan2(imag_last, real_last)  # [B, H]
+        # ★ 提取相位，作为解码初始状态
+        phase = torch.atan2(h_imag_last, h_real_last + 1e-8)
+        h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+        h_phasor = torch.cat([h_cos, h_sin], dim=-1)
+        hidden_out = torch.tanh(self.phase_proj(h_phasor))  # [B, H]
 
-        # 每一个通道都保留自己的 (cos, sin) 特征向量 [B, H, 2]
-        h_cos = torch.cos(phase)  # [B, H]
-        h_sin = torch.sin(phase)  # [B, H]
-        h_phasors = torch.stack([h_cos, h_sin], dim=-1)  # [B, H, 2]
+        if target_ids is not None:
+            T_out = target_ids.shape[1]
+            out_embeds = self.embedding(target_ids)
+            outputs = []
+            for t in range(T_out):
+                emb = out_embeds[:, t, :]  # [B, E]
+                emb_hidden = torch.tanh(self.encoder_proj(emb))  # [B, H]
+                hidden_out = hidden_out + emb_hidden  # 
+                emb_out = torch.tanh(self.decoder_proj(hidden_out))
+                logits = self.output_proj(emb_out)
+                outputs.append(logits)
+            return torch.stack(outputs, dim=1)
 
-        # Step 5: 全通道相干内积解码 (Multi-Channel Un-embedding)
-        normed_embeds = F.normalize(self.token_embeds, p=2, dim=-1) # [vocab_size, 2]
+        else:
+            outputs = []
+            sos_idx = self.vocab_size - 3
+            eos_idx = self.vocab_size - 2
+            current_token = torch.full((B,), sos_idx, device=input_ids.device, dtype=torch.long)
+            for _ in range(20):
+                emb = self.embedding(current_token)
+                emb_hidden = torch.tanh(self.encoder_proj(emb))
+                hidden_out = hidden_out + emb_hidden
+                emb_out = torch.tanh(self.decoder_proj(hidden_out))
+                logits = self.output_proj(emb_out)
+                next_token = torch.argmax(logits, dim=-1)
+                outputs.append(next_token)
+                current_token = next_token
+            return torch.stack(outputs, dim=1)
 
-        # 将每一个通道的 [B, H, 2] 向量直接与 [vocab_size, 2] 的词表向量做点积相干比对
-        # einsum 计算: 'bhc, vc -> bhv' -> 得到每个通道对每个词表 Token 的相似度
-        channel_logits = torch.einsum('bhc, vc -> bhv', h_phasors, normed_embeds)
-
-        # 将 H 个通道的相干结果累加叠加出最终的决策 Logits [B, vocab_size]
-        logits = channel_logits.sum(dim=1) * self.logit_scale
-
-        return logits
-    
     
     
 
