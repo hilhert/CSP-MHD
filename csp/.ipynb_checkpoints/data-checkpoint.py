@@ -11,6 +11,8 @@ class ArithmeticGenerator(ABC):
     def generate(self, max_terms=3, max_digits=2, min_val=0, max_val=100):
         pass
 
+
+    
 def generate_parity_data(num_samples=5000, seq_len=16):
     X = torch.randint(0, 2, (num_samples, seq_len)).float().unsqueeze(-1)
     y = (X.squeeze(-1).sum(dim=1) % 2).long()
@@ -68,35 +70,103 @@ def generate_parenthesis_data(num_samples=5000, seq_len=16):
 
 
 
+class ArithmeticGenerator(ABC):
+    @abstractmethod
+    def generate(self, max_terms=3, max_digits=2, min_val=0, max_val=100):
+        pass
+
+
 class ModNArithmeticGenerator(ArithmeticGenerator):
     """
-    模 N 算术表达式生成器
-    
-    生成形如 "3 + 5 = 8 mod 10" 或 "7 - 2 = 5 mod 3" 的表达式
-    用于 seq2seq 训练，帮助模型学习模运算规则
+    模 N 算术表达式生成器，支持括号嵌套，mod n 放在等号左侧
     """
     
-    def __init__(self, n=10):
-        """
-        Args:
-            n: 模数，默认为 10
-        """
-        self.n = n
+    def __init__(self, n=None, allow_parentheses=True, max_depth=2):
+        self.fixed_n = n
+        self.allow_parentheses = allow_parentheses
+        self.max_depth = max_depth
         self._operators = ['+', '-']
+        self._mod_range = (2, 10)
     
-    def generate(self, max_terms=3, max_digits=2, min_val=0, max_val=100):
-        """
-        生成一个模 N 算术表达式
+    def _get_mod_value(self):
+        if self.fixed_n is not None:
+            return self.fixed_n
+        return random.randint(self._mod_range[0], self._mod_range[1])
+    
+
+    
+    def _generate_expression(self, depth=0, n=10, wrap_outer=False):
+        """递归生成表达式，支持括号嵌套"""
+        if depth < self.max_depth and random.random() < 0.3:
+            left = self._generate_expression(depth + 1, n)
+            op = random.choice(self._operators)
+            right = self._generate_expression(depth + 1, n)
+            expr = f"({left} {op} {right})"
+        else:
+            expr = str(random.randint(0, n - 1))
         
-        Returns:
-            (expr, result): 表达式字符串和结果字符串
-        """
+        # 如果外层需要括号且当前表达式不是单独的叶子节点，可以加括号
+        if wrap_outer and random.random() < 0.4 and depth == 0:
+            return f"({expr})"
+        return expr
+    
+    def _generate_sequence(self, max_terms, depth=0, n=10):
+        """生成包含多个 term 的序列"""
+        if max_terms == 0:
+            return self._generate_expression(depth, n)
+        if max_terms == 1:
+            return self._generate_expression(depth, n)
+        
+        if depth < self.max_depth and random.random() < 0.2:
+            num_terms = random.randint(2, max_terms)
+            parts = []
+            for i in range(num_terms):
+                parts.append(self._generate_expression(depth + 1, n))
+                if i < num_terms - 1:
+                    parts.append(random.choice(self._operators))
+            expr = ' '.join(parts)
+            return f"({expr})"
+        else:
+            num_terms = random.randint(2, max_terms)
+            parts = []
+            for i in range(num_terms):
+                parts.append(self._generate_expression(depth, n))
+                if i < num_terms - 1:
+                    parts.append(random.choice(self._operators))
+            return ' '.join(parts)
+    
+    def generate(self, max_terms=3, max_digits=2, min_val=0, max_val=100,simple=True):
+        """生成模 N 算术表达式"""
+        n = self._get_mod_value()
+        if simple:
+            return self._generate_simple(max_terms,n)
+        else:
+            # 生成表达式
+            expr = self._generate_sequence(max_terms, 0, random.randint(2,n))
+
+            # ★ 随机决定是否给最外层加括号（可选）
+            if random.random() < 0.3:
+                expr = f"({expr})"
+
+            # 安全计算表达式值
+            try:
+                allowed_chars = set('0123456789+-*/() ')
+                if not all(c in allowed_chars for c in expr):
+                    raise ValueError("Expression contains invalid characters")
+                total = int(eval(expr))
+            except Exception:
+                return self._generate_simple(max_terms, n)
+
+            result = total % n
+            return f"({expr}) mod {n} = ", str(result), n
+    
+    def _generate_simple(self, max_terms, n):
+        """简单模式（无括号）的回退方案"""
         num_terms = random.randint(2, max_terms)
         tokens = []
         total = 0
-        
         for i in range(num_terms):
-            num = random.randint(0, self.n - 1)
+            num = random.randint(0, n - 1)
             if i == 0:
                 total = num
             else:
@@ -107,20 +177,21 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
                     total -= num
                 tokens.append(op)
             tokens.append(str(num))
-        
-        # 应用模运算
-        result = total % self.n
+        result = total % n
         expr = ' '.join(tokens)
-        return expr + ' = ', str(result)
+        if random.random() < 0.3:
+            expr = f"({expr})"
+        return f"{expr} mod {n} = ", str(result), n
     
     def build_vocab(self):
-        """构建模 N 运算的词表"""
-        digits = [str(i) for i in range(self.n)]
-        return digits + ['+', '-', '=', ' ', '<SOS>', '<EOS>', '<PAD>']
+        """★ 固定词表：0-9 全部包含，不依赖模数"""
+        digits = [str(i) for i in range(10)]
+        return digits + ['+', '-', '=', ' ', '(', ')', '<SOS>', '<EOS>', '<PAD>', 'mod']
     
     def __call__(self, *args, **kwargs):
-        """使实例可调用，兼容 Dataset 接口"""
         return self.generate(*args, **kwargs)
+
+
 
 
 
@@ -164,6 +235,22 @@ class SymbolicArithmeticDataset(Dataset):
         self.vocab_size = len(self.vocab)
         self.max_len = max(len(s['input']) for s in self.samples) + 10
 
+    
+    def tokenize(self, text):
+        tokens = []
+        i = 0
+        while i < len(text):
+            # 从最长匹配开始尝试
+            for j in range(len(text), i, -1):
+                if text[i:j] in self.char2idx:
+                    tokens.append(text[i:j])
+                    i = j
+                    break
+            # 如果没有匹配到，就跳过当前字符（理论上不会发生）
+            else:
+                i += 1
+        return tokens
+    
     def _build_vocab_from_samples(self):
         vocab_set = set()
         for s in self.samples:
@@ -180,29 +267,31 @@ class SymbolicArithmeticDataset(Dataset):
         # 保留旧版兼容性
         return self._build_vocab_from_samples()
 
-    def _generate(self, num_samples, max_terms, max_digits, min_val, max_val):
+    def _generate(self, num_samples, max_terms, max_digits, min_val, max_val,simple=False):
         samples = []
         for _ in range(num_samples):
-            expr, result = self._generate_expression(max_terms, max_digits, min_val, max_val)
+            expr, result,_ = self._generate_expression(max_terms, max_digits, min_val, max_val,simple=True)
             samples.append({'input': expr , 'output': result})
             
         return samples
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        #print(f"expr: '{sample['input']}', result: '{sample['output']}'")  # ★ 加这行
-        input_tokens = [self.char2idx[c] for c in sample['input']]
-        output_tokens = [self.char2idx[c] for c in sample['output']]
+        input_tokens = [self.char2idx[c] for c in self.tokenize(sample['input'])]
+        output_tokens = [self.char2idx[c] for c in self.tokenize(sample['output'])]
+        #print("input: "+sample['input'])
+        #print("output: "+sample['output'])
+        input_ids = [self.char2idx['<SOS>']] + input_tokens
 
-        input_ids =  [self.char2idx['<SOS>']] + input_tokens 
         if self.mode == 'copy':
-            # 复制模式：输出 = 输入内容 + <EOS>
-            output_ids = input_tokens + [self.char2idx['<EOS>']]
+            # 复制模式：输入内容 + <EOS>
+            output_ids = [self.char2idx['<SOS>']] + input_tokens + [self.char2idx['<EOS>']]
         elif self.mode == 'complete':
-            # 复制+补全模式：输出 = 输入内容 + 结果 + <EOS>
+            # 复制+补全模式：输入内容 + 结果 + <EOS>
             output_ids = input_tokens + output_tokens + [self.char2idx['<EOS>']]
         else:  # compute
-            output_ids = output_tokens + [self.char2idx['<EOS>']]
+            # 计算模式：结果 + <EOS>
+            output_ids = [self.char2idx['<SOS>']] + output_tokens + [self.char2idx['<EOS>']]
         
         # 有效长度（不含 padding）
         in_len = len(input_ids)
