@@ -19,28 +19,29 @@ from utils import (
     setup_logging, plot_training_curves_f1, plot_grokking_analysis_f1, save_checkpoint, load_checkpoint
 )
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(base_dir, 'symseq')
-fig_path = os.path.join(model_path, 'figure')
-os.makedirs(model_path, exist_ok=True)
-os.makedirs(fig_path, exist_ok=True)
-model_name = "symseq.pt"
-cp_path = os.path.join(model_path,model_name)
+
 
 def main():
+    experiment,data_mode,model_mode = 'symseq','complete','atten'
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(base_dir, experiment)
+    fig_path = os.path.join(model_path, 'figure')
+    os.makedirs(model_path, exist_ok=True)
+    os.makedirs(fig_path, exist_ok=True)
     log_file = setup_logging()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     # 数据集
-    gen = ModNArithmeticGenerator(n=3,allow_parentheses=False)
-    mode = 'complete'
+    gen = ModNArithmeticGenerator(n=3,simple = True)
+    model_name = "{}_{}_{}.pt".format(experiment,model_mode,data_mode)
+    cp_path = os.path.join(model_path,model_name)
     train_dataset = SymbolicArithmeticDataset(
         20000, max_terms=3, max_digits=1, min_val=0, max_val=10,
-        generate_expression_func=gen, vocab=None, mode=mode
+        generate_expression_func=gen, vocab=None, mode=data_mode
     )
     test_dataset = SymbolicArithmeticDataset(
         2000, max_terms=3, max_digits=1, min_val=0, max_val=10,
-        generate_expression_func=gen,vocab=None ,mode=mode
+        generate_expression_func=gen,vocab=None ,mode=data_mode
     )
     
     '''
@@ -65,7 +66,7 @@ def main():
     vocab_size = train_dataset.vocab_size
     hidden_dim = 64
     num_layers = 3
-    model = CSP_Seq2Seq(vocab_size, hidden_dim=hidden_dim, num_layers=num_layers,sos_idx=sos_idx).to(device)
+    model = CSP_Seq2Seq(vocab_size, hidden_dim=hidden_dim, num_layers=num_layers,sos_idx=sos_idx,model_mode=model_mode).to(device)
     if os.path.exists(cp_path):
         print(f"加载已有模型: {cp_path}")
         checkpoint = torch.load(cp_path, map_location=device)

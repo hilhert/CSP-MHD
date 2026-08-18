@@ -81,9 +81,9 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
     模 N 算术表达式生成器，支持括号嵌套，mod n 放在等号左侧
     """
     
-    def __init__(self, n=None, allow_parentheses=True, max_depth=2):
+    def __init__(self, n=None, simple=True, max_depth=2):
         self.fixed_n = n
-        self.allow_parentheses = allow_parentheses
+        self.simple = simple
         self.max_depth = max_depth
         self._operators = ['+', '-']
         self._mod_range = (2, 10)
@@ -135,10 +135,10 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
                     parts.append(random.choice(self._operators))
             return ' '.join(parts)
     
-    def generate(self, max_terms=3, max_digits=2, min_val=0, max_val=100,simple=True):
+    def generate(self, max_terms=3, max_digits=2, min_val=0, max_val=100):
         """生成模 N 算术表达式"""
         n = self._get_mod_value()
-        if simple:
+        if self.simple:
             return self._generate_simple(max_terms,n)
         else:
             # 生成表达式
@@ -267,10 +267,10 @@ class SymbolicArithmeticDataset(Dataset):
         # 保留旧版兼容性
         return self._build_vocab_from_samples()
 
-    def _generate(self, num_samples, max_terms, max_digits, min_val, max_val,simple=False):
+    def _generate(self, num_samples, max_terms, max_digits, min_val, max_val):
         samples = []
         for _ in range(num_samples):
-            expr, result,_ = self._generate_expression(max_terms, max_digits, min_val, max_val,simple=True)
+            expr, result,_ = self._generate_expression(max_terms, max_digits, min_val, max_val)
             samples.append({'input': expr , 'output': result})
             
         return samples
@@ -285,13 +285,13 @@ class SymbolicArithmeticDataset(Dataset):
 
         if self.mode == 'copy':
             # 复制模式：输入内容 + <EOS>
-            output_ids = [self.char2idx['<SOS>']] + input_tokens + [self.char2idx['<EOS>']]
+            output_ids =  input_tokens + [self.char2idx['<EOS>']]
         elif self.mode == 'complete':
             # 复制+补全模式：输入内容 + 结果 + <EOS>
             output_ids = input_tokens + output_tokens + [self.char2idx['<EOS>']]
         else:  # compute
             # 计算模式：结果 + <EOS>
-            output_ids = [self.char2idx['<SOS>']] + output_tokens + [self.char2idx['<EOS>']]
+            output_ids = output_tokens + [self.char2idx['<EOS>']]
         
         # 有效长度（不含 padding）
         in_len = len(input_ids)

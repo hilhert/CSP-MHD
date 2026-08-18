@@ -4,6 +4,227 @@ import torch.nn.functional as F
 import math
 
 
+
+class ModSiLU(nn.Module):
+    """
+    复数 ModSiLU：对模长做 SiLU，保持相位不变
+    SiLU(x) = x * sigmoid(x)
+    """
+    def forward(self, h_real, h_imag):
+        magnitude = torch.sqrt(h_real**2 + h_imag**2 + 1e-8)
+        scale = F.silu(magnitude) / (magnitude + 1e-8)
+        return h_real * scale, h_imag * scale
+
+
+class ComplexPRLayer_ATTENTION(nn.Module):
+    def __init__(self, hidden_dim, z=0.1):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.z = z
+
+        # B  kernel matrix composed up with k_proj*v_proj
+        self.B = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * 0.01)
+
+        # 门控
+        self.delta_proj = nn.Linear(hidden_dim, 1)
+        self.gamma_proj = nn.Linear(hidden_dim, 1)
+        self.skip_gate = nn.Parameter(torch.ones(hidden_dim) * 0.5)
+
+        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.zeros_(self.delta_proj.bias)
+        nn.init.zeros_(self.gamma_proj.weight)
+        nn.init.zeros_(self.gamma_proj.bias)
+
+    def tree_penalty(self, h_real):
+        B, T, H = h_real.shape
+
+        h_left = h_real[:, :-1, :]
+        h_right = h_real[:, 1:, :]
+
+        Bh_right = torch.matmul(h_right, self.B)
+        assoc = torch.sum(h_left * Bh_right, dim=-1)
+        # ★ 反转关联度：关联度越小，惩罚越大
+        assoc = torch.sigmoid(-assoc)  # 压缩到 (0,1)，反序
+
+
+        C = torch.zeros(B, T, T, device=h_real.device)
+        for i in range(T):
+            # ★ 用 max 而不是 min：因为我们要找区间内的最大断层
+            C[:,i,i] = 0
+            max_val = torch.full((B,), -1e6, device=h_real.device)
+            for j in range(i+1, T):
+                max_val = torch.max(max_val, assoc[:, j-1])
+                C[:, j, i] = max_val
+
+        # ★ 不归一化，直接返回 C
+        return C
+
+    def forward(self, h_real_seq, h_imag_seq):
+        B, T, H = h_real_seq.shape
+
+        #B_pos = torch.matmul(self.B, self.B.T)
+
+        h_real_input = h_real_seq
+        h_imag_input = h_imag_seq
+
+        attn_scores = torch.matmul( torch.matmul(h_real_seq, self.B),  # [B, T, H]
+                                    h_real_seq.transpose(1, 2)        # [B, H, T]
+                                                                    )  # [B, T, T]
+        attn_scores = torch.sigmoid(attn_scores)
+        # ★ 应用树结构惩罚项 C (上三角矩阵)
+        C = self.tree_penalty(h_real_seq)  # [B, T, T] 只对 i < j 有值
+
+        # ★ 应用惩罚：只对 i < j 的位置（C 有值的位置）加惩罚，mask掉对角线以下。
+
+        attn_scores = attn_scores - self.z * C
+        attn_scores = 1+F.relu(attn_scores)
+        mask = torch.tril(torch.ones(T, T, device=h_real_seq.device), diagonal=0).detach()  # [T, T]
+        mask = mask.unsqueeze(0)  # [1, T, T]
+        attn_scores = attn_scores.masked_fill(mask == 0, 0)
+        
+        attn_weights = attn_scores / (attn_scores.sum(dim=1, keepdim=True) + 1e-6) # [B, T, T]
+
+        # ★ 加权和：attn_weights @ h_real_seq
+        # 对于每个目标 j，用所有源 i 的权重加权
+        h_real_recur = torch.matmul(attn_weights, h_real_seq)  # [B, T, H]
+        h_imag_recur = torch.matmul(attn_weights, h_imag_seq)  # [B, T, H]
+        '''
+        # ★ 然后对每个时间步 j 做状态更新
+        outputs_real, outputs_imag = [], []
+        h_real_prev = torch.zeros(B, H, device=h_real_seq.device)
+        h_imag_prev = torch.zeros(B, H, device=h_real_seq.device)
+
+        for j in range(T):
+            h_real_j = h_real_seq[:, j, :]
+            h_imag_j = h_imag_seq[:, j, :]
+
+            delta_t = F.softplus(self.delta_proj(h_real_j))
+            alpha = torch.exp(-delta_t)
+            gamma_t = torch.sigmoid(self.gamma_proj(h_real_j))
+
+            h_real_new = alpha * h_real_prev + gamma_t * attn_weighted_real[:, j, :]
+            h_imag_new = alpha * h_imag_prev + gamma_t * attn_weighted_imag[:, j, :]
+
+            outputs_real.append(h_real_new)
+            outputs_imag.append(h_imag_new)
+
+            h_real_prev = h_real_new
+            h_imag_prev = h_imag_new
+       
+
+        h_real_recur = torch.stack(outputs_real, dim=1)
+        h_imag_recur = torch.stack(outputs_imag, dim=1)
+        '''
+        gate = torch.sigmoid(self.skip_gate).unsqueeze(0).unsqueeze(0)
+        h_real_skip = h_real_input * gate + F.silu(h_real_recur) 
+        h_imag_skip = h_imag_input * gate + F.silu(h_imag_recur)
+
+        magnitude = torch.sqrt(h_real_skip**2 + h_imag_skip**2 + 1e-8)
+        h_real_out = h_real_skip / magnitude
+        h_imag_out = h_imag_skip / magnitude
+
+        return h_real_out, h_imag_out
+    
+    
+    
+
+class ComplexPRLayer_strict(nn.Module):
+    """
+    复数状态传播层（ComplexPRLayer_strict）
+    使用复数矩阵 W = W_real + i W_imag 来混合实部和虚部
+    """
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        # ★ 复数权重矩阵 W = W_real + i W_imag
+        self.W_real = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * 0.01)
+        self.W_imag = nn.Parameter(torch.randn(hidden_dim, hidden_dim) * 0.01)
+
+        # ★ 门控：输入为 2 * hidden_dim（实部 + 虚部合并）
+        self.delta_proj = nn.Linear(2 * hidden_dim, 1)
+        self.gamma_proj = nn.Linear(2 * hidden_dim, 1)
+        self.skip_gate = nn.Parameter(torch.ones(hidden_dim) * 0.5)
+
+        # 复数激活函数
+        self.mod_silu = ModSiLU()
+
+        # 初始化
+        #nn.init.zeros_(self.delta_proj.weight)
+        #nn.init.zeros_(self.delta_proj.bias)
+        #nn.init.zeros_(self.gamma_proj.weight)
+        #nn.init.zeros_(self.gamma_proj.bias)
+
+    def forward(self, h_real_seq, h_imag_seq):
+        """
+        Args:
+            h_real_seq, h_imag_seq: [B, T, H]
+        Returns:
+            h_real_out, h_imag_out: [B, T, H]
+        """
+        B, T, H = h_real_seq.shape
+
+        # 保存输入用于 Skip 连接
+        h_real_input = h_real_seq
+        h_imag_input = h_imag_seq
+
+        # 初始化上一时刻状态
+        h_real_prev = torch.zeros(B, H, device=h_real_seq.device)
+        h_imag_prev = torch.zeros(B, H, device=h_real_seq.device)
+
+        outputs_real, outputs_imag = [], []
+
+        for t in range(T):
+            h_real_t = h_real_seq[:, t, :]
+            h_imag_t = h_imag_seq[:, t, :]
+
+            # ★ 合并实部和虚部作为门控的输入
+            h_combined = torch.cat([h_real_t, h_imag_t], dim=-1)  # [B, 2*H]
+
+            # ★ 复数矩阵乘法：W * h_prev
+            W_h_real = torch.matmul(h_real_prev, self.W_real.T) - torch.matmul(h_imag_prev, self.W_imag.T)
+            W_h_imag = torch.matmul(h_real_prev, self.W_imag.T) + torch.matmul(h_imag_prev, self.W_real.T)
+
+            # ★ 门控：由合并后的向量生成
+            delta_t = F.softplus(self.delta_proj(h_combined))
+            alpha = torch.exp(-delta_t)
+            
+            # ★ gamma_t 改为周期性门控 (1 + sin(x)) / 2
+            gamma_raw = self.gamma_proj(h_combined)  # [B, 1]
+            gamma_t = (1 + torch.sin(gamma_raw)) / 2  # 范围 [0, 1]
+
+            # ★ 状态更新
+            h_real_new = alpha * h_real_prev + gamma_t * W_h_real
+            h_imag_new = alpha * h_imag_prev + gamma_t * W_h_imag
+
+            outputs_real.append(h_real_new)
+            outputs_imag.append(h_imag_new)
+
+            # 更新上一时刻状态
+            h_real_prev = h_real_new
+            h_imag_prev = h_imag_new
+
+        # 堆叠输出
+        h_real_recur = torch.stack(outputs_real, dim=1)
+        h_imag_recur = torch.stack(outputs_imag, dim=1)
+
+        # ★ 复数 ModSiLU 激活
+        h_real_act, h_imag_act = self.mod_silu(h_real_recur, h_imag_recur)
+
+        # ★ Skip 连接：gate * input + (1 - gate) * activated
+        gate = torch.sigmoid(self.skip_gate).unsqueeze(0).unsqueeze(0)  # [1, 1, H]
+        h_real_skip = h_real_input * gate + h_real_act 
+        h_imag_skip = h_imag_input * gate + h_imag_act 
+
+        # ★ 复数归一化
+        magnitude = torch.sqrt(h_real_skip**2 + h_imag_skip**2 + 1e-8)
+        h_real_out = h_real_skip / magnitude
+        h_imag_out = h_imag_skip / magnitude
+
+        return h_real_out, h_imag_out
+
+
+
 class ComplexPRLayer(nn.Module):
     """
     Complex Propagator with Rotation block.
@@ -150,7 +371,7 @@ class CSP(nn.Module):
         return self.decoder(x_dec)
     
 class CSP_Seq2Seq(nn.Module):
-    def __init__(self, vocab_size, hidden_dim=64, num_layers=3, embed_dim=32,sos_idx=-4):
+    def __init__(self, vocab_size, hidden_dim=64, num_layers=3, embed_dim=32,sos_idx=-4,model_mode='atten'):
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_dim = hidden_dim
@@ -158,7 +379,15 @@ class CSP_Seq2Seq(nn.Module):
         self.encoder_proj = nn.Linear(embed_dim, hidden_dim)
         self.phase_proj   = nn.Linear(2*hidden_dim,hidden_dim)
         #self.decoder_proj = nn.Linear(hidden_dim, embed_dim)
-        self.layers = nn.ModuleList([ComplexPRLayer(hidden_dim) for _ in range(num_layers)])
+        if model_mode == 'strict':
+            self.layers = nn.ModuleList([ComplexPRLayer_strict(hidden_dim) for _ in range(num_layers)])
+            print("Strict mode received! I'm createing hidden layer with modsilu and complex number matrix mul!")
+        elif model_mode == 'atten':
+            self.layers = nn.ModuleList([ComplexPRLayer_ATTENTION(hidden_dim) for _ in range(num_layers)])
+            print("Atten mode received! I'm createing attention style hidden layer!")
+        else:
+            self.layers = nn.ModuleList([ComplexPRLayer(hidden_dim) for _ in range(num_layers)])
+            print("No known mode explicted! Draw back to relax mode with shared weights and per domain activate!")
         #self.gate_proj = nn.Linear(2*hidden_dim,hidden_dim)
         #self.combine_proj = nn.Linear(embed_dim,hidden_dim)
         self.output_proj  = lambda x: torch.matmul(x, self.embedding.weight.T)
@@ -167,12 +396,29 @@ class CSP_Seq2Seq(nn.Module):
         self.max_len = 30
         self.sos_idx=sos_idx
         self.decoder_proj = nn.Linear(hidden_dim,embed_dim)
+        
+    def fixed_rotation(self, h_real, h_imag, max_angle=20):
+        """
+        对输入状态做固定旋转（所有时间步一次性计算）
+        h_real, h_imag: [B, T, H]
+        max_angle: 最大旋转角度（度）
+        """
+        B, T, H = h_real.shape
+        # 生成所有时间步的角度
+        theta = torch.arange(T, device=h_real.device) / (T + 1) * max_angle * torch.pi / 180
+        # 扩展维度以便广播
+        theta = theta.view(1, T, 1)  # [1, T, 1]
+        cos_t, sin_t = torch.cos(theta), torch.sin(theta)
+        h_real_rot = cos_t * h_real - sin_t * h_imag
+        h_imag_rot = sin_t * h_real + cos_t * h_imag
+        return h_real_rot, h_imag_rot
 
     def forward(self, input_ids, target_ids=None):
         B, T_in = input_ids.shape
         x = self.embedding(input_ids)
         h = torch.tanh(self.encoder_proj(x))  #may be used in teacher forcing!
         h_real, h_imag = h, torch.zeros_like(h)
+        h_real, h_imag = self.fixed_rotation(h_real,h_imag)
 
         for layer in self.layers:
             h_real, h_imag = layer(h_real, h_imag)
