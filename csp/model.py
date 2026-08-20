@@ -15,6 +15,93 @@ class ModSiLU(nn.Module):
         scale = F.silu(magnitude) / (magnitude + 1e-8)
         return h_real * scale, h_imag * scale
 
+class LinearTreeAttnLayer(nn.Module):
+    def __init__(self, num_heads, hidden_dim, p=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.p = p
+
+        # 核矩阵 B: [num_heads, head_dim, head_dim]
+        # 如果 hidden_dim 不能被 num_heads 整除，head_dim 会被截断
+        # 这相当于丢弃了多余的维度，但保留主要结构
+        self.B = nn.Parameter(torch.randn(num_heads, self.head_dim, self.head_dim) * 0.01)
+        self.B_FUSE = nn.Parameter(torch.randn(num_heads,num_heads) * 0.01)
+        self.gate = nn.Parameter(torch.randn(hidden_dim) * 0.01)
+        # ★ 因果mask：只保留下三角（包括对角线）
+        #self.register_buffer('causal_mask', None)
+        
+
+    def forward(self, x):
+        """
+        x: [B, T, 2, H]  0: real, 1: imag
+        """
+        B, T, _, H = x.shape
+        d = self.head_dim
+        #if self.causal_mask is None or self.causal_mask.size(0) != T:
+        mask = torch.tril(torch.ones(T, T, device=x.device), diagonal=0).detach()  # [T, T]
+        causal_mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, T, T]
+        
+
+        # 1. 只取实部计算注意力，重塑为多头
+        z = x[:, :, 0, :]  # [B, T, H]
+        z = z.view(B, T, self.num_heads, d)  # [B, T, num_heads, d]
+
+        # 2. 计算多头注意力分数
+        zB = torch.einsum('bthd, hdd -> bthd', z, self.B)  # [B, T, num_heads, d]
+        attn_scores = torch.einsum('bthd, bHhd -> bthH', zB, z)  # [B, T, num_heads, T]
+        attn_scores = torch.sigmoid(attn_scores)
+        
+        
+        # 3. 提取次对角线（用于树结构惩罚）
+        subdiag = torch.diagonal(attn_scores, offset=1, dim1=1, dim2=3)  # [B, num_heads, T-1] 
+        subdiag = 1-subdiag
+        assert not torch.any(subdiag < 0), f"subdiag has unsuitable values! "
+        assert not torch.any(subdiag > 1), f"subdiag has unsuitable values! "
+        # 4. 树结构惩罚（累积和版本）
+        accu = torch.cumsum(torch.exp(subdiag), dim=-1)  # [B, num_heads, T-1]
+        accu = torch.cat([torch.zeros(B, self.num_heads, 1, device=x.device), accu], dim=-1)  # [B, num_heads, T]
+        #print(accu[0,0,:])
+        C = accu.unsqueeze(-1) - accu.unsqueeze(-2)  # [B, num_heads, T, T]# [B, num_heads, T, T]
+        C = C.masked_fill(causal_mask == 0, 0)
+        assert not torch.any(C < 0), f"C has negative values! min: {C.min().item()}"
+        C = torch.log(1+C+1e-6)
+        assert not torch.any(C < 0), f"C has negative values after log! min: {C.min().item()}"
+        # 5. 应用惩罚
+        attn_scores = attn_scores.permute(0, 2, 1, 3)  # [B, num_heads, T, T]
+        attn_scores = 1 + F.relu(attn_scores - self.p * C)
+
+        # 6. 跨头融合
+        sim_maxsubdiag = C[:,:,-1,0] # [B, num_heads]
+        zBF = torch.einsum('bh, hh -> bh', sim_maxsubdiag, self.B_FUSE)  # [B, num_heads]
+        cross_attn = torch.einsum('bh, bH -> bhH', zBF, sim_maxsubdiag)  # [B, num_heads, num_heads]
+        cross_attn = torch.sigmoid(cross_attn)
+        cross_attn = cross_attn / (torch.sum(cross_attn, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, num_heads]
+
+        # 更新 attn_scores
+        attn_scores = torch.einsum('bhtT, bhh -> bhtT', attn_scores, cross_attn)  # [B, num_heads, T, T]
+
+        # 因果mask + 归一化
+        attn_scores = attn_scores.masked_fill(causal_mask == 0, 0)
+        attn_scores = attn_scores / (torch.sum(attn_scores, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, T, T]
+
+        # 取平均得到最终注意力
+        attn_final = attn_scores.mean(dim=1)  # [B, T, T]
+
+        # 7. 更新 x
+        x_flat = x.view(B, T, -1)
+        x_weighted = torch.matmul(attn_final, x_flat).view(B, T, 2, H)
+
+        x_out = x * torch.sigmoid(self.gate) + F.silu(x_weighted)
+        magnitude = torch.sqrt(x_out[:, :, 0, :]**2 + x_out[:, :, 1, :]**2 + 1e-8)
+        x_out = x_out / magnitude.unsqueeze(2)
+
+        return x_out
+        
+        
+        
+    
+    
 
 class ComplexPRLayer_ATTENTION(nn.Module):
     def __init__(self, hidden_dim, z=0.1):
@@ -371,13 +458,13 @@ class CSP(nn.Module):
         return self.decoder(x_dec)
     
 class CSP_Seq2Seq(nn.Module):
-    def __init__(self, vocab_size, hidden_dim=64, num_layers=3, embed_dim=32,sos_idx=-4,model_mode='atten'):
+    def __init__(self, vocab_size, head_dim=16, n_head=4, num_layers=3, embed_dim=32,sos_idx=-4,model_mode='atten_mhead'):
         super().__init__()
         self.vocab_size = vocab_size
-        self.hidden_dim = hidden_dim
+        self.hidden_dim = head_dim*n_head
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.encoder_proj = nn.Linear(embed_dim, hidden_dim)
-        self.phase_proj   = nn.Linear(2*hidden_dim,hidden_dim)
+        self.encoder_proj = nn.Linear(embed_dim, self.hidden_dim)
+        self.phase_proj   = nn.Linear(2*self.hidden_dim,self.hidden_dim)
         #self.decoder_proj = nn.Linear(hidden_dim, embed_dim)
         if model_mode == 'strict':
             self.layers = nn.ModuleList([ComplexPRLayer_strict(hidden_dim) for _ in range(num_layers)])
@@ -385,6 +472,9 @@ class CSP_Seq2Seq(nn.Module):
         elif model_mode == 'atten':
             self.layers = nn.ModuleList([ComplexPRLayer_ATTENTION(hidden_dim) for _ in range(num_layers)])
             print("Atten mode received! I'm createing attention style hidden layer!")
+        elif model_mode == 'atten_mhead':
+            self.layers = nn.ModuleList([LinearTreeAttnLayer(n_head, self.hidden_dim, p=0.1) for _ in range(num_layers)])
+            print("Linear Tree Atten mode received! I'm createing tree attention style hidden layer!")
         else:
             self.layers = nn.ModuleList([ComplexPRLayer(hidden_dim) for _ in range(num_layers)])
             print("No known mode explicted! Draw back to relax mode with shared weights and per domain activate!")
@@ -395,7 +485,7 @@ class CSP_Seq2Seq(nn.Module):
         #self.embedding_proj = nn.Linear(hidden_dim,embed_dim)
         self.max_len = 30
         self.sos_idx=sos_idx
-        self.decoder_proj = nn.Linear(hidden_dim,embed_dim)
+        self.decoder_proj = nn.Linear(self.hidden_dim,embed_dim)
         
     def fixed_rotation(self, h_real, h_imag, max_angle=20):
         """
@@ -419,12 +509,14 @@ class CSP_Seq2Seq(nn.Module):
         h = torch.tanh(self.encoder_proj(x))  #may be used in teacher forcing!
         h_real, h_imag = h, torch.zeros_like(h)
         h_real, h_imag = self.fixed_rotation(h_real,h_imag)
+        x = torch.stack([h_real,h_imag],dim=2)
+        
 
         for layer in self.layers:
-            h_real, h_imag = layer(h_real, h_imag)
+            x = layer(x)
 
-        h_real_last = h_real[:, -1, :]
-        h_imag_last = h_imag[:, -1, :]
+        h_real_last = x[:, -1, 0,:]
+        h_imag_last = x[:, -1, 1,:]
         
         # ★ 提取相位，作为解码初始状态
         phase = torch.atan2(h_imag_last, h_real_last + 1e-8)

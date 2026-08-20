@@ -120,7 +120,7 @@ We observe clear **grokking** on Parity, Mod-3 Counting and Parenthesis Matching
 
 ```bash
 # Clone
-git clone https://github.com/hilhert1987/CSP.git
+git clone https://github.com/hilhert/CSP.git
 cd CSP
 
 # Install

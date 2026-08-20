@@ -22,7 +22,7 @@ def save_checkpoint(model, optimizer, epoch, loss, f1, filepath):
     
     save_model(model, safetensors_path)
     
-def load_checkpoint(filepath, model, optimizer=None):
+def load_checkpoint(filepath, model, optimizer=None, device='cpu'):
     """
     【恢复训练专用】从 .pt 检查点加载模型与优化器状态。
     
@@ -38,7 +38,7 @@ def load_checkpoint(filepath, model, optimizer=None):
         raise FileNotFoundError(f"找不到检查点文件: {filepath}")
         
     print(f"[Checkpoint] 正在恢复训练状态: {filepath}")
-    checkpoint = torch.load(filepath, map_location='cpu')
+    checkpoint = torch.load(filepath, map_location=device)
     
     # 1. 恢复模型权重
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -182,7 +182,7 @@ def train_model_seq(model, dataloader, optimizer, criterion, device):
     for batch in tqdm(dataloader, desc='Training'):
         input_ids = batch['input_ids'].to(device)
         output_ids = batch['output_ids'].to(device)
-        out_len = batch['out_len']
+        out_len = batch['out_len'].to(device)
         
         # 直接传 output_ids，forward 内部会处理
         logits = model(input_ids, output_ids)  # [B, T, vocab_size]

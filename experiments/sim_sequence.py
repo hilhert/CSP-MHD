@@ -22,7 +22,7 @@ from utils import (
 
 
 def main():
-    experiment,data_mode,model_mode = 'symseq','complete','atten'
+    experiment,data_mode,model_mode = 'symseq','complete','atten_mhead'
     base_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(base_dir, experiment)
     fig_path = os.path.join(model_path, 'figure')
@@ -32,15 +32,15 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     # 数据集
-    gen = ModNArithmeticGenerator(n=3,simple = True)
+    gen = ModNArithmeticGenerator(n=10,simple = False)
     model_name = "{}_{}_{}.pt".format(experiment,model_mode,data_mode)
     cp_path = os.path.join(model_path,model_name)
     train_dataset = SymbolicArithmeticDataset(
-        20000, max_terms=3, max_digits=1, min_val=0, max_val=10,
+        200000, max_terms=3, max_digits=1, min_val=0, max_val=9,
         generate_expression_func=gen, vocab=None, mode=data_mode
     )
     test_dataset = SymbolicArithmeticDataset(
-        2000, max_terms=3, max_digits=1, min_val=0, max_val=10,
+        20000, max_terms=3, max_digits=1, min_val=0, max_val=10,
         generate_expression_func=gen,vocab=None ,mode=data_mode
     )
     
@@ -54,7 +54,7 @@ def main():
     return
     '''
     
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
     # 获取特殊 token 索引
@@ -64,9 +64,10 @@ def main():
 
     # 模型
     vocab_size = train_dataset.vocab_size
-    hidden_dim = 64
-    num_layers = 3
-    model = CSP_Seq2Seq(vocab_size, hidden_dim=hidden_dim, num_layers=num_layers,sos_idx=sos_idx,model_mode=model_mode).to(device)
+    hidden_dim = 256
+    n_head = 8
+    num_layers = 7
+    model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,sos_idx=sos_idx,model_mode=model_mode).to(device)
     if os.path.exists(cp_path):
         print(f"加载已有模型: {cp_path}")
         checkpoint = torch.load(cp_path, map_location=device)
@@ -91,8 +92,8 @@ def main():
     test_accs=[]
     minimum_loss = float('inf')
     for epoch in range(start_epoch,start_epoch+epochs):
-        loss = train_model_seq(model, train_loader, optimizer, criterion, device)
-        acc = evaluate_seq(model, test_loader, device, pad_idx, eos_idx,debug=True)
+        loss = train_model_seq(model, train_loader, optimizer, criterion, device=device)
+        acc = evaluate_seq(model, test_loader, device, pad_idx, eos_idx,debug=False)
         #print(f"Epoch {epoch+1}: Loss={loss:.4f}, Acc={acc:.4f}")
         #best_acc = 0
         '''
