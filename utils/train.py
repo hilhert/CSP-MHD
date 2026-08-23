@@ -176,7 +176,7 @@ def train_model(model, train_loader, test_loader, epochs=300,weight_decay=1e-8,l
     
     return train_losses, f1s,test_accs, gradient_norms
 
-def train_model_seq(model, dataloader, optimizer, criterion, device):
+def train_model_seq(model, dataloader, optimizer, criterion, device,focal=False):
     model.train()
     total_loss = 0
     for batch in tqdm(dataloader, desc='Training'):
@@ -190,8 +190,26 @@ def train_model_seq(model, dataloader, optimizer, criterion, device):
         
         mask = torch.arange(targets.size(1), device=device).unsqueeze(0) < out_len.unsqueeze(1)
         
+        
         loss = criterion(logits.permute(0, 2, 1), targets)
-        loss = (loss * mask.float()).sum() / mask.sum()
+        
+        if focal:
+            
+            max_len = loss.size(1)
+            
+            t = torch.arange(max_len, device=loss.device).float().unsqueeze(0)  # [1, T]
+            # 用 sigmoid 函数生成权重，范围从 0.5 到 1.0
+            weights = torch.sigmoid((t - max_len/2) / (max_len/6))  # [1, T]
+            
+            weights = weights.repeat(loss.size(0), 1)  # [B, T]
+            
+            weights = weights * mask.float()
+            
+            loss = (loss * weights).sum()/ (weights.sum() + 1e-6)
+           
+
+        else:    
+            loss = (loss * mask.float()).sum() / mask.sum()    
         
         optimizer.zero_grad()
         loss.backward()

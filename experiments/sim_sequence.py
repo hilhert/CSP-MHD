@@ -66,8 +66,9 @@ def main():
     vocab_size = train_dataset.vocab_size
     hidden_dim = 256
     n_head = 8
-    num_layers = 7
-    model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,sos_idx=sos_idx,model_mode=model_mode).to(device)
+    num_layers = 8
+    embed_dim  = 64
+    model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,embed_dim=embed_dim,sos_idx=sos_idx,model_mode=model_mode).to(device)
     if os.path.exists(cp_path):
         print(f"加载已有模型: {cp_path}")
         checkpoint = torch.load(cp_path, map_location=device)
@@ -87,14 +88,15 @@ def main():
     #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
     #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs*1.5, eta_min=1e-5)
     #optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx,reduction='none')
 
     # 训练循环
     epochs = 50
     test_accs=[]
     minimum_loss = float('inf')
+    focal = {"alpha":0.25, "gamma":2.0}
     for epoch in range(start_epoch,start_epoch+epochs):
-        loss = train_model_seq(model, train_loader, optimizer, criterion, device=device)
+        loss = train_model_seq(model, train_loader, optimizer, criterion, device=device,focal=None)
         acc = evaluate_seq(model, test_loader, device, pad_idx, eos_idx,debug=True)
         #print(f"Epoch {epoch+1}: Loss={loss:.4f}, Acc={acc:.4f}")
         #best_acc = 0

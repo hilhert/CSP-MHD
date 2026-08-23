@@ -30,14 +30,17 @@ class LinearMhRBFKAttnLayer(nn.Module):
         
 
         # 1. take real part to build attentions，multi_head
-        z = x[:, :, 0, :]  # [B, T, H]
-        z = z.view(B, T, self.num_heads, d)  # [B, T, num_heads, d]
-
+        z , zi  =   x[:, :, 0, :], x[:, :, 1, :]  # [B, T, H]
+        z   =   z.view(B, T, self.num_heads, d)  # [B, T, num_heads, d]
+        zi  =   zi.view(B, T, self.num_heads, d)   
+        
         # 2. compute the attention score
-        zB = torch.einsum('bthd, hdd -> bthd', z, self.B)  # [B, T, num_heads, d]
+        zB    = torch.einsum('bthd, hdd -> bthd', z, self.B)  # [B, T, num_heads, d]
+        ziB   = torch.einsum('bthd, hdd -> bthd', zi, self.B)
         
-        
-        dist_unformulated = torch.einsum('bthd, bHhd -> bthH', zB, z).permute(0,2,1,3)  # [B, num_heads,T, T]
+        dist_unformulated_r = torch.einsum('bthd, bHhd -> bthH', zB, z).permute(0,2,1,3)  # [B, num_heads,T, T]
+        dist_unformulated_i = torch.einsum('bthd, bHhd -> bthH', ziB, zi).permute(0,2,1,3)  # [B, num_heads,T, T]
+        dist_unformulated  = dist_unformulated_r + dist_unformulated_i  # Regard as dual channel info!
         #attn_scores = torch.sigmoid(attn_scores)
         diag  = torch.diagonal(dist_unformulated,dim1=2,dim2=3) #[B,num_heads,T]
         
@@ -500,42 +503,52 @@ class CSP_BLOCK(nn.Module):
     
     
 class CSP_Seq2Seq(nn.Module):
-    def __init__(self, vocab_size, head_dim=16, n_head=4,num_layers=3,embed_dim=32,sos_idx=-4,model_mode='atten_mhead',train_method='teacher_forcing'):
+    def __init__(self, vocab_size, head_dim=16, n_head=4,num_layers=3,embed_dim=32,sos_idx=-4,model_mode='atten_mhead',train_method='teacher_forcing',angle_step =0.0025):
         super().__init__()
         self.train_method = train_method
         self.vocab_size = vocab_size
         self.hidden_dim = head_dim*n_head
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.encoder_proj = nn.Linear(embed_dim, self.hidden_dim)
-        self.phase_proj   = nn.Linear(2*self.hidden_dim,self.hidden_dim)
+        #self.phase_proj   = nn.Linear(2*self.hidden_dim,self.hidden_dim)
         self.blocks   = nn.ModuleList([CSP_BLOCK(head_dim,n_head,num_layers,model_mode)])
+        #self.decision_kernel = nn.Parameter(torch.randn(embed_dim,embed_dim))
         self.output_proj  = lambda x: torch.matmul(x, self.embedding.weight.T)
         self.max_len = 30
         self.sos_idx=sos_idx
-        self.decoder_proj = nn.Linear(self.hidden_dim,embed_dim)
+        self.decoder_proj = nn.Linear(2*self.hidden_dim,embed_dim)
+        self.angle_step = angle_step
         
-    def fixed_rotation(self, h_real, h_imag, max_angle=20):
+        self.alpha_proj = nn.Linear(self.hidden_dim,1)
+        
+    def rotation(self, h_real, h_imag, angle_step,pre_angle=None):
         """
         roation with all time sequence inputs 
         h_real, h_imag: [B, T, H]
         max_angle: maximum rotation angle
         """
-        B, T, H = h_real.shape
-        # generate angles across T
-        theta = torch.arange(T, device=h_real.device) / (T + 1) * max_angle * torch.pi / 180
-        # boradcast
-        theta = theta.view(1, T, 1)  # [1, T, 1]
+        if pre_angle is None:
+            B, T, H = h_real.shape
+            # generate angles across T
+            theta = torch.arange(T, device=h_real.device) *angle_step * torch.pi
+            # boradcast
+            theta = theta.view(1, T, 1)  # [1, T, 1]
+        else:
+            theta = torch.full((1, 1), (pre_angle + angle_step) * torch.pi, device=h_real.device)
+            
         cos_t, sin_t = torch.cos(theta), torch.sin(theta)
         h_real_rot = cos_t * h_real - sin_t * h_imag
         h_imag_rot = sin_t * h_real + cos_t * h_imag
+        
         return h_real_rot, h_imag_rot
+
 
     def forward(self, input_ids, target_ids=None):
         B, T_in = input_ids.shape
         x = self.embedding(input_ids)
         h = torch.tanh(self.encoder_proj(x))  #may be used in teacher forcing!
         h_real, h_imag = h, torch.zeros_like(h)
-        h_real, h_imag = self.fixed_rotation(h_real,h_imag)
+        h_real, h_imag = self.rotation(h_real,h_imag,angle_step=self.angle_step)
         x = torch.stack([h_real,h_imag],dim=2)
         
 
@@ -543,41 +556,67 @@ class CSP_Seq2Seq(nn.Module):
             x = block(x)
 
         # extract phase for initial of decode
+        '''
         phase = torch.atan2(x[:, :, 0,:], x[:, :, 1,:] + 1e-8)
         h_cos, h_sin = torch.cos(phase), torch.sin(phase)
         h_phasor = torch.cat([h_cos, h_sin], dim=-1)
         hidden_out = torch.tanh(self.phase_proj(h_phasor))  # [B, H] the last hidden state
-        
+        '''
+        hidden_out = x[:,-1,:,:]
         if self.train_method == 'teacher_forcing':
-            hidden_out = hidden_out[:,-1,:]
+            
             if target_ids is not None:
                 T_out = target_ids.shape[1]
                 out_embeds = self.embedding(target_ids)
                 outputs = []
                 current_token = torch.full((B,), self.sos_idx, device=input_ids.device, dtype=torch.long)  # <SOS>
                 emb = self.embedding(current_token)  # [B, E]
+                out_embeds = torch.cat([emb.unsqueeze(1),out_embeds],dim=1)
+                emb_hidden = torch.tanh(self.encoder_proj(out_embeds))
+                emb_hr, emb_hi = self.rotation(emb_hidden, torch.zeros_like(emb_hidden),self.angle_step,None)
+                emb_hidden = torch.stack([emb_hr, emb_hi],dim=-2)
                 for t in range(T_out):
-                    emb_hidden = torch.tanh(self.encoder_proj(emb))  # [B, H]
-                    hidden_out = hidden_out + emb_hidden  # 
-                    emb_out = torch.tanh(self.decoder_proj(hidden_out))
+                    alpha      = torch.sigmoid(self.alpha_proj(hidden_out[:,0,:]))
+                    hidden_out = torch.stack([alpha,alpha],dim=1)*hidden_out + F.silu(emb_hidden[:,t,:,:])  # 
+                    phase = torch.atan2(hidden_out[:, 0,:], hidden_out[:, 1,:] + 1e-8)
+                    h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+                    h_phasor = torch.cat([h_cos, h_sin], dim=-1)
+                    #hidden_out = torch.tanh(self.phase_proj(h_phasor))
+                    emb_out = torch.tanh(self.decoder_proj(h_phasor))
+                    #torch.matmul(self.embedding.weight, self.decision_kernel
                     logits = self.output_proj(emb_out)
                     outputs.append(logits)
                     emb = out_embeds[:, t, :]  # [B, E]
+                    magnitude = torch.sqrt(hidden_out[:,0,:]**2 + hidden_out[:,1,:]**2 + 1e-8)
+                    hidden_out = hidden_out/magnitude.unsqueeze(1)
                 return torch.stack(outputs, dim=1)
 
             else:
                 outputs = []
                 current_token = torch.full((B,), self.sos_idx, device=input_ids.device, dtype=torch.long)
-                for _ in range(20):
-                    emb = self.embedding(current_token)
-                    emb_hidden = torch.tanh(self.encoder_proj(emb))
-                    hidden_out = hidden_out + emb_hidden
-                    emb_out = torch.tanh(self.decoder_proj(hidden_out))
+                pre_angle = -self.angle_step
+                for t in range(40):
+                    emb            = self.embedding(current_token)
+                    emb_hidden     = torch.tanh(self.encoder_proj(emb))
+                    emb_hr, emb_hi = self.rotation(emb_hidden, torch.zeros_like(emb_hidden),self.angle_step,pre_angle=pre_angle)
+                    emb_hidden = torch.stack([emb_hr, emb_hi],dim=-2)
+                    alpha      = torch.sigmoid(self.alpha_proj(hidden_out[:,0,:]))
+                    hidden_out = torch.stack([alpha,alpha],dim=1)*hidden_out + F.silu(emb_hidden)
+                    phase = torch.atan2(hidden_out[:, 0,:], hidden_out[:, 1,:] + 1e-8)
+                    h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+                    h_phasor = torch.cat([h_cos, h_sin], dim=-1)
+                    #hidden_out = torch.tanh(self.phase_proj(h_phasor))
+                    emb_out = torch.tanh(self.decoder_proj(h_phasor))
                     logits = self.output_proj(emb_out)
                     next_token = torch.argmax(logits, dim=-1)
                     outputs.append(next_token)
                     current_token = next_token
+                    pre_angle += self.angle_step
+                    magnitude = torch.sqrt(hidden_out[:,0,:]**2 + hidden_out[:,1,:]**2 + 1e-8)
+                    hidden_out = hidden_out/magnitude.unsqueeze(1)
+                    
                 return torch.stack(outputs, dim=1)
+            
         else:     # using transformer style recurrent reasoning! train and test aligned!
          
             emb_out_norm   = F.normalize(hidden_out, p=2, dim=-1)  # [B, T, embed_dim]

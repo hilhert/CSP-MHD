@@ -186,7 +186,7 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
     def build_vocab(self):
         """★ 固定词表：0-9 全部包含，不依赖模数"""
         digits = [str(i) for i in range(10)]
-        return digits + ['+', '-', '=', ' ', '(', ')', '<SOS>', '<EOS>', '<PAD>', 'mod']
+        return digits + ['+', '-', '=', ' ', '(', ')', '<SOS>', '<EOS>', '<PAD>', 'mod',' repeat ']
     
     def __call__(self, *args, **kwargs):
         return self.generate(*args, **kwargs)
@@ -288,7 +288,7 @@ class SymbolicArithmeticDataset(Dataset):
             output_ids =  input_tokens + [self.char2idx['<EOS>']]
         elif self.mode == 'complete':
             # 复制+补全模式：输入内容 + 结果 + <EOS>
-            output_ids = input_tokens + output_tokens + [self.char2idx['<EOS>']]
+            output_ids = output_tokens + [self.char2idx[' repeat ']] + input_tokens + output_tokens + [self.char2idx['<EOS>']] 
         else:  # compute
             # 计算模式：结果 + <EOS>
             output_ids = output_tokens + [self.char2idx['<EOS>']]
