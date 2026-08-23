@@ -195,7 +195,7 @@ def train_model_seq(model, dataloader, optimizer, criterion, device):
         
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(dataloader)
@@ -242,7 +242,7 @@ def evaluate_seq(model, dataloader, device, pad_idx, eos_idx, debug=True):
     
     return correct / total
 
-
+'''
 def train_epoch_seq(model, dataloader, optimizer, criterion, device):
     model.train()
     total_loss = 0
@@ -260,10 +260,10 @@ def train_epoch_seq(model, dataloader, optimizer, criterion, device):
 
         # 构造权重矩阵：有效位置权重为 1，最后一个有效 token 权重为 out_len - 1
         weight = mask.float()
-        '''
+        
         for i in range(targets.size(0)):
             weight[i, out_len[i] - 1] = out_len[i] - 1  # 只对每个样本的最后一个有效 token 设置权重
-        '''
+        
         loss = criterion(logits.permute(0, 2, 1), targets)
         loss = (loss * weight).sum() / weight.sum()
         
@@ -273,3 +273,4 @@ def train_epoch_seq(model, dataloader, optimizer, criterion, device):
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(dataloader)
+'''

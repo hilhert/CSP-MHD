@@ -22,7 +22,7 @@ from utils import (
 
 
 def main():
-    experiment,data_mode,model_mode = 'symseq','complete','atten_mhead'
+    experiment,data_mode,model_mode = 'symseq','complete',"atten_rbf"
     base_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(base_dir, experiment)
     fig_path = os.path.join(model_path, 'figure')
@@ -32,7 +32,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     # 数据集
-    gen = ModNArithmeticGenerator(n=10,simple = False)
+    gen = ModNArithmeticGenerator(n=9,simple = False)
     model_name = "{}_{}_{}.pt".format(experiment,model_mode,data_mode)
     cp_path = os.path.join(model_path,model_name)
     train_dataset = SymbolicArithmeticDataset(
@@ -40,7 +40,7 @@ def main():
         generate_expression_func=gen, vocab=None, mode=data_mode
     )
     test_dataset = SymbolicArithmeticDataset(
-        20000, max_terms=3, max_digits=1, min_val=0, max_val=10,
+        20000, max_terms=3, max_digits=1, min_val=0, max_val=9,
         generate_expression_func=gen,vocab=None ,mode=data_mode
     )
     
@@ -83,8 +83,10 @@ def main():
     
     #model = CSP_Seq2Seq(vocab_size, hidden_dim=64, num_layers=7).to(device)
     print(f"参数量: {sum(p.numel() for p in model.parameters()):,}")
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3,weight_decay=1e-4)
+    #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs*1.5, eta_min=1e-5)
+    #optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
     # 训练循环
@@ -93,7 +95,7 @@ def main():
     minimum_loss = float('inf')
     for epoch in range(start_epoch,start_epoch+epochs):
         loss = train_model_seq(model, train_loader, optimizer, criterion, device=device)
-        acc = evaluate_seq(model, test_loader, device, pad_idx, eos_idx,debug=False)
+        acc = evaluate_seq(model, test_loader, device, pad_idx, eos_idx,debug=True)
         #print(f"Epoch {epoch+1}: Loss={loss:.4f}, Acc={acc:.4f}")
         #best_acc = 0
         '''
