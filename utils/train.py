@@ -210,13 +210,18 @@ def train_model_seq(model, dataloader, optimizer, criterion, device,focal=False)
 
         else:    
             loss = (loss * mask.float()).sum() / mask.sum()    
+        total_norm = 0.0
+        for p in model.parameters():
+                if p.grad is not None:
+                    total_norm += p.grad.data.norm(2).item() ** 2
+        total_norm = total_norm**0.5
         
         optimizer.zero_grad()
         loss.backward()
         #torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_loss += loss.item()
-    return total_loss / len(dataloader)
+    return total_loss / len(dataloader), total_norm
 
 
 def evaluate_seq(model, dataloader, device, pad_idx, eos_idx, debug=True):

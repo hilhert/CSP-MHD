@@ -370,22 +370,22 @@ class ComplexPRLayer(nn.Module):
         Returns:
             h_real_out, h_imag_out: [B, T, H]
         """
-        B, T, H = h_real_seq.shape
+        B, T,_, H = x.shape
 
         # Save input for skip connection
         h_real_input = x[:,:,0,:]
         h_imag_input = x[:,:,1,:]
 
-        h_real_prev = torch.zeros(B, H, device=h_real_seq.device)
-        h_imag_prev = torch.zeros(B, H, device=h_real_seq.device)
+        h_real_prev = torch.zeros(B, H, device=x.device)
+        h_imag_prev = torch.zeros(B, H, device=x.device)
         #h_real_prev = h_real_input[:,-1,:]
         #h_imag_prev = h_imag_input[:,-1,:]
         
         outputs_real, outputs_imag = [], []
 
         for t in range(T):
-            h_real_t = h_real_seq[:, t, :]
-            h_imag_t = h_imag_seq[:, t, :]
+            h_real_t = x[:, t, 0 , :]
+            h_imag_t = x[:, t, 1 , :]
 
             # 1. Rotate: theta_t from input
             decision_linear_prev = torch.cat([h_real_prev,h_imag_prev],dim=-1)
@@ -493,7 +493,7 @@ class CSP_BLOCK(nn.Module):
         elif model_mode == "atten_rbf":
             self.layers = nn.ModuleList([LinearMhRBFKAttnLayer(n_head, self.hidden_dim, p=0.1) for _ in range(num_layers)])
         else:
-            self.layers = nn.ModuleList([ComplexPRLayer(hidden_dim) for _ in range(num_layers)])
+            self.layers = nn.ModuleList([ComplexPRLayer(self.hidden_dim) for _ in range(num_layers)])
             print("No known mode explicted! Draw back to relax mode with shared weights and per domain activate!")
 
     def forward(self,x):
