@@ -29,7 +29,7 @@ class LinearMhRBFKAttnLayer(nn.Module):
         causal_mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, T, T]
         
 
-        # 1. take real part to build attentions，multi_head
+        # 1. take both real part and imag part to build attentions，multi_head
         z , zi  =   x[:, :, 0, :], x[:, :, 1, :]  # [B, T, H]
         z   =   z.view(B, T, self.num_heads, d)  # [B, T, num_heads, d]
         zi  =   zi.view(B, T, self.num_heads, d)   
@@ -44,7 +44,7 @@ class LinearMhRBFKAttnLayer(nn.Module):
         #attn_scores = torch.sigmoid(attn_scores)
         diag  = torch.diagonal(dist_unformulated,dim1=2,dim2=3) #[B,num_heads,T]
         
-        dist = diag.unsqueeze(-1) + diag.unsqueeze(-2) - 2*dist_unformulated  # suppose all positive 
+        dist = diag.unsqueeze(-1) + diag.unsqueeze(-2) - 2*dist_unformulated  # mahalonobis distance is all positive 
         
         
         
@@ -59,9 +59,9 @@ class LinearMhRBFKAttnLayer(nn.Module):
         #print(accu[0,0,:])
         C = accu.unsqueeze(-1) - accu.unsqueeze(-2)  # [B, num_heads, T, T]# [B, num_heads, T, T]
         C = C.masked_fill(causal_mask == 0, 0)
-        assert not torch.any(C < 0), f"C has negative values! min: {C.min().item()}"
-        C = torch.log(1+C+1e-6)
-        assert not torch.any(C < 0), f"C has negative values after log! min: {C.min().item()}"
+        #assert not torch.any(C < 0), f"C has negative values! min: {C.min().item()}"
+        C = torch.log(1+C+1e-6)  # sim max, log_sum_exp
+        #assert not torch.any(C < 0), f"C has negative values after log! min: {C.min().item()}"
         # 5. apply penalty
         #attn_scores = torch.sigmoid(attn_scores)
         
@@ -78,15 +78,20 @@ class LinearMhRBFKAttnLayer(nn.Module):
         dist_mixture = torch.einsum('bhtT, bhh -> bhtT', dist_rect, cross_attn)  # [B, num_heads, T, T]
         attn_scores = torch.exp(-dist_mixture)
         
+        #attn_scores = torch.exp(-(torch.sin(dist_mixture)+1)/2)  # May help ... Seriously!
+        
+        
         # causual mask + normalize
         attn_scores = attn_scores.masked_fill(causal_mask == 0, 0)
         attn_scores = attn_scores / (torch.sum(attn_scores, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, T, T]
        
         
 
-        # pick the final attn map after attention weight average
-        attn_final = attn_scores[:,-1,:,:]  # [B, T, T]
-       
+        # Average the attend confused attention! 
+        attn_final = attn_scores.mean(dim=1) # [B, T, T]
+        # experimental
+        
+    
         # 7. update x
         x_flat = x.view(B, T, -1)
         x_weighted = torch.matmul(attn_final, x_flat).view(B, T, 2, H)
@@ -100,6 +105,9 @@ class LinearMhRBFKAttnLayer(nn.Module):
 
 
 class LinearRBFAttnLayer(nn.Module):
+    '''
+    Deprecated! Only test for exp(-||xi-xj||/(\\sigma_i \\sigma_j)), but it valid for learn input structure!
+    '''
     def __init__(self,  hidden_dim, p=1):
         super().__init__()
         self.logp = nn.Parameter(torch.tensor(0.5))
@@ -160,6 +168,9 @@ class LinearRBFAttnLayer(nn.Module):
 
     
 class LinearTreeAttnLayer(nn.Module):
+    '''
+    The first version of mhead tree atten, It can train successfully!
+    '''
     def __init__(self, num_heads, hidden_dim, p=0.1):
         super().__init__()
         self.num_heads = num_heads
@@ -250,6 +261,9 @@ class LinearTreeAttnLayer(nn.Module):
     
 
 class ComplexPRLayer_ATTENTION(nn.Module):
+    '''
+    Experiment Code, Runs Slowly!
+    '''
     def __init__(self, hidden_dim, z=0.1):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -300,24 +314,24 @@ class ComplexPRLayer_ATTENTION(nn.Module):
         h_real_input = x[:,:,0,:]
         h_imag_input = x[:,:,1,:]
 
-        attn_scores = torch.matmul( torch.matmul(h_real_seq, self.B),  # [B, T, H]
-                                    h_real_seq.transpose(1, 2)        # [B, H, T]
+        attn_scores = torch.matmul( torch.matmul(h_real_input, self.B),  # [B, T, H]
+                                    h_real_input.transpose(1, 2)        # [B, H, T]
                                                                     )  # [B, T, T]
         attn_scores = torch.sigmoid(attn_scores)
         # ★ implement tree penalty
-        C = self.tree_penalty(h_real_seq)  # [B, T, T] 
+        C = self.tree_penalty(h_real_input)  # [B, T, T] 
 
         attn_scores = attn_scores - self.z * C
         attn_scores = 1+F.relu(attn_scores)
-        mask = torch.tril(torch.ones(T, T, device=h_real_seq.device), diagonal=0).detach()  # [T, T]
+        mask = torch.tril(torch.ones(T, T, device=h_real_input.device), diagonal=0).detach()  # [T, T]
         mask = mask.unsqueeze(0)  # [1, T, T]
         attn_scores = attn_scores.masked_fill(mask == 0, 0)
         
         attn_weights = attn_scores / (attn_scores.sum(dim=1, keepdim=True) + 1e-6) # [B, T, T]
 
         # ★ apply attention ：attn_weights @ h_real_seq
-        h_real_recur = torch.matmul(attn_weights, h_real_seq)  # [B, T, H]
-        h_imag_recur = torch.matmul(attn_weights, h_imag_seq)  # [B, T, H]
+        h_real_recur = torch.matmul(attn_weights, h_real_input)  # [B, T, H]
+        h_imag_recur = torch.matmul(attn_weights, h_imag_input)  # [B, T, H]
         
         gate = torch.sigmoid(self.skip_gate).unsqueeze(0).unsqueeze(0)
         h_real_skip = h_real_input * gate + F.silu(h_real_recur) 
@@ -334,6 +348,13 @@ class ComplexPRLayer_ATTENTION(nn.Module):
 
 class ComplexPRLayer(nn.Module):
     """
+    
+    Vanilla CSP Layer, Mamba Style Recurrent inside Each Layer!
+    I modified the delta t /gamma gate to a period function of allow build vocab. 
+    This is because normal single projection's value could not difference vocab embedding! 
+    But it practise, different embeds must allow to be porjected the similar delta t/gamma.
+    Please notice that this layer is not well optimizaed, I runs really slow in Practise!
+
     Complex Propagator with Rotation block.
 
     Components:
@@ -503,12 +524,18 @@ class CSP_BLOCK(nn.Module):
     
     
 class CSP_Seq2Seq(nn.Module):
-    def __init__(self, vocab_size, head_dim=16, n_head=4,num_layers=3,embed_dim=32,sos_idx=-4,model_mode='atten_mhead',train_method='teacher_forcing',angle_step =0.0025):
+    def __init__(self, vocab_size, head_dim=16, n_head=4,num_layers=3,embed_dim=32,sos_idx=-4,pad_idx=-3,eos_idx=-2,model_mode='atten_mhead',train_method='teacher_forcing',angle_step =0.0025):
         super().__init__()
         self.train_method = train_method
         self.vocab_size = vocab_size
         self.hidden_dim = head_dim*n_head
+        self.embed_dim = embed_dim
         self.embedding = nn.Embedding(vocab_size, embed_dim)
+        with torch.no_grad():
+            self.embedding.weight[sos_idx].zero_()
+            self.embedding.weight[sos_idx].requires_grad = False
+        
+        
         self.encoder_proj = nn.Linear(embed_dim, self.hidden_dim)
         #self.phase_proj   = nn.Linear(2*self.hidden_dim,self.hidden_dim)
         self.blocks   = nn.ModuleList([CSP_BLOCK(head_dim,n_head,num_layers,model_mode)])
@@ -516,10 +543,16 @@ class CSP_Seq2Seq(nn.Module):
         self.output_proj  = lambda x: torch.matmul(x, self.embedding.weight.T)
         self.max_len = 30
         self.sos_idx=sos_idx
-        self.decoder_proj = nn.Linear(2*self.hidden_dim,embed_dim)
+        self.pad_idx=pad_idx
+        self.els_idx=eos_idx
+        #self.decoder_proj = nn.Linear(2*self.hidden_dim,self.embed_dim)
         self.angle_step = angle_step
         
         self.alpha_proj = nn.Linear(self.hidden_dim,1)
+        
+        self.emb_K   = nn.Linear(self.embed_dim,self.embed_dim)
+        self.ahidden_Q = nn.Linear(2*self.hidden_dim, self.embed_dim)
+        self.emb_V   = nn.Linear(self.embed_dim,self.embed_dim)
         
     def rotation(self, h_real, h_imag, angle_step,pre_angle=None):
         """
@@ -562,9 +595,9 @@ class CSP_Seq2Seq(nn.Module):
         h_phasor = torch.cat([h_cos, h_sin], dim=-1)
         hidden_out = torch.tanh(self.phase_proj(h_phasor))  # [B, H] the last hidden state
         '''
-        hidden_out = x[:,-1,:,:]
+        
         if self.train_method == 'teacher_forcing':
-            
+            hidden_out = x[:,-1,:,:]
             if target_ids is not None:
                 T_out = target_ids.shape[1]
                 out_embeds = self.embedding(target_ids)
@@ -573,6 +606,7 @@ class CSP_Seq2Seq(nn.Module):
                 emb = self.embedding(current_token)  # [B, E]
                 out_embeds = torch.cat([emb.unsqueeze(1),out_embeds],dim=1)
                 emb_hidden = torch.tanh(self.encoder_proj(out_embeds))
+                
                 emb_hr, emb_hi = self.rotation(emb_hidden, torch.zeros_like(emb_hidden),self.angle_step,None)
                 emb_hidden = torch.stack([emb_hr, emb_hi],dim=-2)
                 for t in range(T_out):
@@ -582,9 +616,35 @@ class CSP_Seq2Seq(nn.Module):
                     h_cos, h_sin = torch.cos(phase), torch.sin(phase)
                     h_phasor = torch.cat([h_cos, h_sin], dim=-1)
                     #hidden_out = torch.tanh(self.phase_proj(h_phasor))
-                    emb_out = torch.tanh(self.decoder_proj(h_phasor))
+                    #emb_out = torch.tanh(self.decoder_proj(h_phasor))
                     #torch.matmul(self.embedding.weight, self.decision_kernel
-                    logits = self.output_proj(emb_out)
+                    #logits = self.output_proj(emb_out)
+                    '''
+                    perform query, key match between recurrent_hidden_state(query) and embeddings(key). 
+                    '''
+                    #pad_mask = torch.ones(self.vocab_size, device=self.embedding.weight.device)
+                    #pad_mask[self.pad_idx] = 0  # <PAD> 位置为 0
+                    
+                    hidden_Q  =  self.ahidden_Q(h_phasor)   # [B,embed_dim]
+                    frozen_embedding = self.embedding.weight.detach()
+                    
+                    emb_K     = self.emb_K(frozen_embedding) # [vocabsize, embed_dim]
+                    hidden_Q = hidden_Q / (hidden_Q.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
+                    emb_K = emb_K / (emb_K.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
+                    #logits  =  torch.matmul(hidden_Q,emb_K.T)
+                    
+                    
+                    dist_sq = torch.cdist(hidden_Q, emb_K, p=2) ** 2  # [B, vocab_size]
+                    attn_voc = torch.softmax(-dist_sq, dim=-1) 
+                    
+                    
+                    emb_V     =  self.emb_V(frozen_embedding)  # [vocabsize , embed_dim]
+                    emb_out   =  torch.matmul(attn_voc,emb_V+frozen_embedding) #[B , embed_dim]
+                    
+                    logits    =  self.output_proj(emb_out)
+                    
+                    
+                    
                     outputs.append(logits)
                     emb = out_embeds[:, t, :]  # [B, E]
                     magnitude = torch.sqrt(hidden_out[:,0,:]**2 + hidden_out[:,1,:]**2 + 1e-8)
@@ -606,8 +666,30 @@ class CSP_Seq2Seq(nn.Module):
                     h_cos, h_sin = torch.cos(phase), torch.sin(phase)
                     h_phasor = torch.cat([h_cos, h_sin], dim=-1)
                     #hidden_out = torch.tanh(self.phase_proj(h_phasor))
-                    emb_out = torch.tanh(self.decoder_proj(h_phasor))
-                    logits = self.output_proj(emb_out)
+                    #emb_out = torch.tanh(self.decoder_proj(h_phasor))
+                    #logits = self.output_proj(emb_out)
+                    '''
+                    perform query, key match between recurrent_hidden_state(query) and embeddings(key). 
+                    '''
+                    #pad_mask = torch.ones(self.vocab_size, device=self.embedding.weight.device)
+                    #pad_mask[self.pad_idx] = 0  # <PAD> 位置为 0
+                    hidden_Q  =  self.ahidden_Q(h_phasor)    # [B,embed_dim]
+                    frozen_embedding = self.embedding.weight.detach()
+                    
+                    emb_K     =  self.emb_K(frozen_embedding) # [vocabsize, embed_dim]
+                    hidden_Q = hidden_Q / (hidden_Q.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
+                    emb_K = emb_K / (emb_K.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
+                    #logits  =  torch.matmul(hidden_Q,emb_K.T)
+                    
+                    dist_sq = torch.cdist(hidden_Q, emb_K, p=2) ** 2  # [B, vocab_size]
+                    attn_voc = torch.softmax(-dist_sq, dim=-1) 
+                    
+                    emb_V     =  self.emb_V(frozen_embedding)  # [vocabsize , embed_dim]
+                    emb_out   =  torch.matmul(attn_voc,emb_V+frozen_embedding) #[B , embed_dim]
+                    
+                    
+                    logits    =  self.output_proj(emb_out)
+                    
                     next_token = torch.argmax(logits, dim=-1)
                     outputs.append(next_token)
                     current_token = next_token
@@ -619,6 +701,10 @@ class CSP_Seq2Seq(nn.Module):
             
         else:     # using transformer style recurrent reasoning! train and test aligned!
          
+            phase = torch.atan2(x[:, :, 0,:], x[:, :, 1,:] + 1e-8)
+            h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+            h_phasor = torch.cat([h_cos, h_sin], dim=-1)
+            hidden_out = torch.tanh(self.decode_proj(h_phasor))  # [B, H] the last hidden state
             emb_out_norm   = F.normalize(hidden_out, p=2, dim=-1)  # [B, T, embed_dim]
             embedding_norm = F.normalize(self.embedding.weight, p=2, dim=-1)  # [vocab_size, embed_dim]
 

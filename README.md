@@ -1,6 +1,6 @@
 # MHA-CSP: Mahalanobis-Based Multi-Head Attention for Complex State Propagation
 
-[![arXiv](https://img.shields.io/badge/arXiv-2608.XXXXX-b31b1b.svg)](https://arxiv.org/abs/2608.XXXXX)
+[![arXiv](https://img.shields.io/badge/arXiv-2608.24462-b31b1b.svg)](https://arxiv.org/abs/2608.24462)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
@@ -15,10 +15,11 @@ With **119K parameters** and **teacher forcing at the final hidden state**, MHA-
 @article{li2026mhacsp,
   title={Mahalanobis-Based Multi-Head Attention for Complex State Propagation},
   author={Li, Xiaohe},
-  journal={arXiv preprint arXiv:2608.XXXXX},
+  journal={arXiv preprint arXiv:2608.24462},
   year={2026}
 }
 ```
+**Note:** This repository tracks the latest experimental code and ongoing development. Implementation details may differ from the published paper as we continue to explore improvements and refinements.Currently, we are experimenting with an additional QV query mechanism for final logits — results and code are subject to change as we continue to explore improvements.
 
 ## Architecture
 
@@ -88,7 +89,7 @@ python train_mini_arformer.py   # baseline
 @article{li2026mhacsp,
   title={Mahalanobis-Based Multi-Head Attention for Complex State Propagation},
   author={Li, Xiaohe},
-  journal={arXiv preprint arXiv:2608.XXXXX},
+  journal={arXiv preprint arXiv:2608.24462},
   year={2026}
 }
 ```

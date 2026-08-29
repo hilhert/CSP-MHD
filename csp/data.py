@@ -235,6 +235,20 @@ class SymbolicArithmeticDataset(Dataset):
         self.vocab_size = len(self.vocab)
         self.max_len = max(len(s['input']) for s in self.samples) + 10
 
+    def update(self,num_samples, max_terms, max_digits, min_val, max_val,generate_experssion_func=None ):
+        
+        if not generate_experssion_func:
+            
+            pass
+        
+        else:
+            
+            self._generate_expression = generate_expression_func
+        
+        self.samples = self._generate(num_samples, max_terms, max_digits, min_val, max_val)
+            
+        
+    
     
     def tokenize(self, text):
         tokens = []
