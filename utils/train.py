@@ -191,10 +191,10 @@ def train_model_seq(model, dataloader, optimizer, criterion, device,focal=False)
         mask = torch.arange(targets.size(1), device=device).unsqueeze(0) < out_len.unsqueeze(1)
         
         
-        loss = criterion(logits.permute(0, 2, 1), targets)
+        
         
         if focal:
-            
+            '''
             max_len = loss.size(1)
             
             t = torch.arange(max_len, device=loss.device).float().unsqueeze(0)  # [1, T]
@@ -206,10 +206,22 @@ def train_model_seq(model, dataloader, optimizer, criterion, device,focal=False)
             weights = weights * mask.float()
             
             loss = (loss * weights).sum()/ (weights.sum() + 1e-6)
+            '''
+            head_weight = 3
+            #tail_weight = 2.0
+            seq_weight = 1
+
+            # 头（第一个 token）是答案
+            head_loss = criterion(logits[:, 0, :], targets[:, 0])
+            seq_loss = criterion(logits[:, 1:, :].permute(0,2,1), targets[:, 1:])
+
+            loss = (seq_weight * seq_loss + head_weight * head_loss)/(head_weight+seq_weight) 
            
 
         else:    
-            loss = (loss * mask.float()).sum() / mask.sum()    
+            loss = criterion(logits.permute(0, 2, 1), targets)
+        
+        loss = (loss * mask.float()).sum() / mask.sum()    
         total_norm = 0.0
         for p in model.parameters():
                 if p.grad is not None:

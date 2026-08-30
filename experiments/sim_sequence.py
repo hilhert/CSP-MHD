@@ -97,7 +97,12 @@ def main():
     
     #model = CSP_Seq2Seq(vocab_size, hidden_dim=64, num_layers=7).to(device)
     print(f"numel of params: {sum(p.numel() for p in model.parameters()):,}")
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3,weight_decay=5e-4)
+    if 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("Optimizer state restored (including adjusted learning rate).")
+    
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
     #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
     #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs*1.5, eta_min=1e-5)

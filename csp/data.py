@@ -103,10 +103,12 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
             right = self._generate_expression(depth + 1, n)
             expr = f"({left} {op} {right})"
         else:
-            expr = str(random.randint(0, n - 1))
+            num = random.randint(1-n, n - 1)
+            return str(num)
+            
         
         # 如果外层需要括号且当前表达式不是单独的叶子节点，可以加括号
-        if wrap_outer and random.random() < 0.4 and depth == 0:
+        if wrap_outer and random.random() < 0.4 and depth <=1:
             return f"({expr})"
         return expr
     
@@ -117,7 +119,7 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
         if max_terms == 1:
             return self._generate_expression(depth, n)
         
-        if depth < self.max_depth and random.random() < 0.2:
+        if random.random() < 0.2:
             num_terms = random.randint(2, max_terms)
             parts = []
             for i in range(num_terms):
@@ -142,7 +144,8 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
             return self._generate_simple(max_terms,n)
         else:
             # 生成表达式
-            expr = self._generate_sequence(max_terms, 0, random.randint(2,n))
+            
+            expr = self._generate_sequence(random.randint(0,max_terms), 0, n)
 
             # ★ 随机决定是否给最外层加括号（可选）
             if random.random() < 0.3:
@@ -158,7 +161,7 @@ class ModNArithmeticGenerator(ArithmeticGenerator):
                 return self._generate_simple(max_terms, n)
 
             result = total % n
-            return f"({expr}) mod {n} = ", str(result), n
+            return f"{expr} mod {n} = ", str(result), n
     
     def _generate_simple(self, max_terms, n):
         """简单模式（无括号）的回退方案"""
