@@ -74,6 +74,7 @@ def main():
     num_layers = 16
     embed_dim  = 64
     model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,embed_dim=embed_dim,sos_idx=sos_idx,pad_idx=pad_idx,eos_idx=eos_idx,model_mode=model_mode).to(device)
+    checkpoint=None
     if os.path.exists(cp_path):
         print(f"Loading existence model: {cp_path}")
         checkpoint = torch.load(cp_path, map_location=device)
@@ -99,11 +100,11 @@ def main():
     print(f"numel of params: {sum(p.numel() for p in model.parameters()):,}")
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3,weight_decay=5e-4)
-    if 'optimizer_state_dict' in checkpoint:
+    if checkpoint and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print("Optimizer state restored (including adjusted learning rate).")
     
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
     #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
     #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs*1.5, eta_min=1e-5)
     #optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)

@@ -71,7 +71,7 @@ class LinearMhRBFKAttnLayer(nn.Module):
         sim_maxsubdiag = C[:,:,-1,0] # [B, num_heads]  sim maxium scores in subdiag selected!
         zBF = torch.einsum('bh, hh -> bh', sim_maxsubdiag, self.B_FUSE)  # [B, num_heads]
         cross_attn = torch.einsum('bh, bH -> bhH', zBF, sim_maxsubdiag)  # [B, num_heads, num_heads]
-        cross_attn = 1+F.relu(cross_attn)
+        cross_attn = 1+F.silu(cross_attn)
         cross_attn = cross_attn / (torch.sum(cross_attn, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, num_heads]
 
         # update synthetic dist and generate attn acores! 
@@ -490,7 +490,7 @@ class CSP(nn.Module):
         for layer in self.layers:
             x = layer(x)  #normed before layer output
         # Phase decoding: read out phase information
-        phase = torch.atan2(x[:,-1,0,:], h_real[:,-1,1,:]) 
+        phase = torch.atan2(x[:,-1,1,:], x[:,-1,0,:]+1e-8) 
         #phase = self.masked_atan(h_imag[:,-1,:], h_real[:,-1,:])
         x_dec  =  torch.cat([torch.cos(phase),torch.sin(phase)],dim=-1) 
         #x = torch.stack([h_imag[:,-1,:],h_real[:,-1,:]],dim=-1)
@@ -590,7 +590,7 @@ class CSP_Seq2Seq(nn.Module):
 
         # extract phase for initial of decode
         '''
-        phase = torch.atan2(x[:, :, 0,:], x[:, :, 1,:] + 1e-8)
+        phase = torch.atan2(x[:, :, 1,:], x[:, :, 0,:] + 1e-8)
         h_cos, h_sin = torch.cos(phase), torch.sin(phase)
         h_phasor = torch.cat([h_cos, h_sin], dim=-1)
         hidden_out = torch.tanh(self.phase_proj(h_phasor))  # [B, H] the last hidden state
@@ -612,7 +612,7 @@ class CSP_Seq2Seq(nn.Module):
                 for t in range(T_out):
                     alpha      = torch.sigmoid(self.alpha_proj(hidden_out[:,0,:]))
                     hidden_out = torch.stack([alpha,alpha],dim=1)*hidden_out + F.silu(emb_hidden[:,t,:,:])  # 
-                    phase = torch.atan2(hidden_out[:, 0,:], hidden_out[:, 1,:] + 1e-8)
+                    phase = torch.atan2(hidden_out[:, 1,:], hidden_out[:, 0,:] + 1e-8)
                     h_cos, h_sin = torch.cos(phase), torch.sin(phase)
                     h_phasor = torch.cat([h_cos, h_sin], dim=-1)
                     #hidden_out = torch.tanh(self.phase_proj(h_phasor))
@@ -662,7 +662,7 @@ class CSP_Seq2Seq(nn.Module):
                     emb_hidden = torch.stack([emb_hr, emb_hi],dim=-2)
                     alpha      = torch.sigmoid(self.alpha_proj(hidden_out[:,0,:]))
                     hidden_out = torch.stack([alpha,alpha],dim=1)*hidden_out + F.silu(emb_hidden)
-                    phase = torch.atan2(hidden_out[:, 0,:], hidden_out[:, 1,:] + 1e-8)
+                    phase = torch.atan2(hidden_out[:, 1,:], hidden_out[:, 0,:] + 1e-8)
                     h_cos, h_sin = torch.cos(phase), torch.sin(phase)
                     h_phasor = torch.cat([h_cos, h_sin], dim=-1)
                     #hidden_out = torch.tanh(self.phase_proj(h_phasor))
@@ -701,7 +701,7 @@ class CSP_Seq2Seq(nn.Module):
             
         else:     # using transformer style recurrent reasoning! train and test aligned!
          
-            phase = torch.atan2(x[:, :, 0,:], x[:, :, 1,:] + 1e-8)
+            phase = torch.atan2(x[:, :, 1,:], x[:, :,0,:] + 1e-8)
             h_cos, h_sin = torch.cos(phase), torch.sin(phase)
             h_phasor = torch.cat([h_cos, h_sin], dim=-1)
             hidden_out = torch.tanh(self.decode_proj(h_phasor))  # [B, H] the last hidden state
