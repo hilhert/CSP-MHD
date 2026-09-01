@@ -35,15 +35,38 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     # Airthmetic Data Set, n reperesents the modular number
-    gen = ModNArithmeticGenerator(n=9,simple = False)
+   
     model_name = "{}_{}_{}.pt".format(experiment,model_mode,data_mode)
     cp_path = os.path.join(model_path,model_name)
+    '''
+    model param
+    '''
+    hidden_dim = 256
+    n_head = 8
+    num_layers = 16
+    embed_dim  = 64
+    '''
+    data param
+    '''
+    
+    trn_ba_sz  =128
+    tst_ba_sz  = trn_ba_sz//2
+    v_train    = 256000
+    v_test     = v_train//10
+    n          =9    #modular number
+    max_digits = 1
+    max_val    =9
+    min_val    =0
+    max_terms  =3
+    epochs = 50
+    
+    gen = ModNArithmeticGenerator(n=n,simple = False)
     train_dataset = SymbolicArithmeticDataset(
-        200000, max_terms=3, max_digits=1, min_val=0, max_val=9,
+        v_train, max_terms=max_terms, max_digits=max_digits, min_val=min_val, max_val=max_val,
         generate_expression_func=gen, vocab=None, mode=data_mode
     )
     test_dataset = SymbolicArithmeticDataset(
-        20000, max_terms=3, max_digits=1, min_val=0, max_val=9,
+        v_test, max_terms=max_terms, max_digits=max_digits, min_val=min_val, max_val=max_val,
         generate_expression_func=gen,vocab=None ,mode=data_mode
     )
     
@@ -57,8 +80,8 @@ def main():
     return
     '''
     
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=trn_ba_sz, shuffle=True,drop_last=True)
+    test_loader = DataLoader(test_dataset, batch_size=tst_ba_sz, shuffle=False,drop_last=True)
 
     # get special token index
     pad_idx = train_dataset.char2idx['<PAD>']
@@ -69,11 +92,9 @@ def main():
 
     # model param
     vocab_size = train_dataset.vocab_size
-    hidden_dim = 256
-    n_head = 8
-    num_layers = 16
-    embed_dim  = 64
-    model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,embed_dim=embed_dim,sos_idx=sos_idx,pad_idx=pad_idx,eos_idx=eos_idx,model_mode=model_mode).to(device)
+
+    
+    model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,embed_dim=embed_dim,sos_idx=sos_idx,pad_idx=pad_idx,eos_idx=eos_idx,model_mode=model_mode,extend_historical=2).to(device)
     checkpoint=None
     if os.path.exists(cp_path):
         print(f"Loading existence model: {cp_path}")
@@ -104,14 +125,14 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         print("Optimizer state restored (including adjusted learning rate).")
     
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
     #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
     #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs*1.5, eta_min=1e-5)
     #optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx,reduction='none')
 
     # traning epoches
-    epochs = 50
+   
     
     best_accu = 0.0
     #focal = {"alpha":0.25, "gamma":2.0}
@@ -134,18 +155,18 @@ def main():
         experiment_results["grad_norms"].append(grad_norm)
         experiment_results["accs"].append(acc)
         
-        scheduler.step()
+        #scheduler.step()
         if (epoch+1)%10==0:
             
-            train_dataset.update(200000, max_terms=3, max_digits=1, min_val=0, max_val=9)
-            test_dataset.update(20000, max_terms=3, max_digits=1, min_val=0, max_val=9)
+            train_dataset.update(v_train, max_terms=max_terms, max_digits=max_digits, min_val=min_val, max_val=max_val)
+            test_dataset.update(v_test, max_terms=max_terms, max_digits=max_digits, min_val=min_val, max_val=max_val)
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
             # Rebuild dataloader!
-            train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-            test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+            train_loader = DataLoader(train_dataset, batch_size=trn_ba_sz, shuffle=True,drop_last=True)
+            test_loader = DataLoader(test_dataset, batch_size=tst_ba_sz, shuffle=False,drop_last=True)
             
         
         if best_accu<acc:

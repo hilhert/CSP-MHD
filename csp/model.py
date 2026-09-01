@@ -66,11 +66,13 @@ class LinearMhRBFKAttnLayer(nn.Module):
         #attn_scores = torch.sigmoid(attn_scores)
         
         dist_rect = dist + torch.exp(self.logp) * C
-
+        
         # 6. cross head attention!
-        sim_maxsubdiag = C[:,:,-1,0] # [B, num_heads]  sim maxium scores in subdiag selected!
-        zBF = torch.einsum('bh, hh -> bh', sim_maxsubdiag, self.B_FUSE)  # [B, num_heads]
-        cross_attn = torch.einsum('bh, bH -> bhH', zBF, sim_maxsubdiag)  # [B, num_heads, num_heads]
+        sim_maxdist_ph = C[:,:,-1,0] # [B, num_heads]  sim maxium scores in subdiag selected!
+        #c_dist         = torch.einsum('bh, bH -> bhH', sim_maxdist_ph, sim_maxdist_ph)*self.B_FUSE
+        
+        zBF = torch.einsum('bh, hh -> bh', sim_maxdist_ph, self.B_FUSE)  # [B, num_heads]
+        cross_attn = torch.einsum('bh, bH -> bhH', zBF, sim_maxdist_ph)  # [B, num_heads, num_heads]
         cross_attn = 1+F.silu(cross_attn)
         cross_attn = cross_attn / (torch.sum(cross_attn, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, num_heads]
 
@@ -524,7 +526,7 @@ class CSP_BLOCK(nn.Module):
     
     
 class CSP_Seq2Seq(nn.Module):
-    def __init__(self, vocab_size, head_dim=16, n_head=4,num_layers=3,embed_dim=32,sos_idx=-4,pad_idx=-3,eos_idx=-2,model_mode='atten_mhead',train_method='teacher_forcing',angle_step =0.0025):
+    def __init__(self, vocab_size, head_dim=16, n_head=4,num_layers=3,embed_dim=32,sos_idx=-4,pad_idx=-3,eos_idx=-2,model_mode='atten_mhead',train_method='teacher_forcing',angle_step =0.0025, extend_historical= 0):
         super().__init__()
         self.train_method = train_method
         self.vocab_size = vocab_size
@@ -541,7 +543,7 @@ class CSP_Seq2Seq(nn.Module):
         self.blocks   = nn.ModuleList([CSP_BLOCK(head_dim,n_head,num_layers,model_mode)])
         #self.decision_kernel = nn.Parameter(torch.randn(embed_dim,embed_dim))
         self.output_proj  = lambda x: torch.matmul(x, self.embedding.weight.T)
-        self.max_len = 30
+        self.max_len = 40
         self.sos_idx=sos_idx
         self.pad_idx=pad_idx
         self.els_idx=eos_idx
@@ -553,6 +555,9 @@ class CSP_Seq2Seq(nn.Module):
         self.emb_K   = nn.Linear(self.embed_dim,self.embed_dim)
         self.ahidden_Q = nn.Linear(2*self.hidden_dim, self.embed_dim)
         self.emb_V   = nn.Linear(self.embed_dim,self.embed_dim)
+        self.extend_historical = extend_historical
+        self.tail_weight = nn.Parameter(torch.ones(1)*0.5)
+        
         
     def rotation(self, h_real, h_imag, angle_step,pre_angle=None):
         """
@@ -576,6 +581,183 @@ class CSP_Seq2Seq(nn.Module):
         return h_real_rot, h_imag_rot
 
 
+    
+    def forward(self, input_ids, target_ids=None):
+        B, T_in = input_ids.shape
+        x = self.embedding(input_ids)
+        h = torch.tanh(self.encoder_proj(x))
+        h_real, h_imag = h, torch.zeros_like(h)
+        h_real, h_imag = self.rotation(h_real, h_imag, angle_step=self.angle_step)
+        x = torch.stack([h_real, h_imag], dim=2)
+
+        for block in self.blocks:
+            x = block(x)
+
+        hidden_out = x[:, -1, :, :]  # [B, 2, H]
+        
+        
+        
+        
+        
+        if self.train_method == 'teacher_forcing':
+            # ========== vocab part ==========    
+            frozen_embedding = self.embedding.weight.detach()  # [vocab, H]
+            emb_K_vocab = self.emb_K(frozen_embedding)  # [vocab, H]
+            emb_K_vocab_norm = emb_K_vocab / (emb_K_vocab.norm(dim=-1, keepdim=True) + 1e-6)
+            emb_V_vocab = self.emb_V(frozen_embedding) +frozen_embedding # [vocab, H]
+            #emb_V_vocab_norm = emb_V_vocab / (emb_V_vocab.norm(dim=-1, keepdim=True) + 1e-6)
+            
+            if self.extend_historical > 0 and T_in > self.extend_historical:
+                hist_sup = x[:, -self.extend_historical-1:-1, :, :].detach()  # [B, hist, 2, H]
+                phase_sup = torch.atan2(hist_sup[:, :, 1, :], hist_sup[:, :, 0, :] + 1e-8)  # [B, hist, H]
+                sup_cos, sup_sin = torch.cos(phase_sup), torch.sin(phase_sup)
+                sup_phasor = torch.cat([sup_cos, sup_sin], dim=-1)  # [B, hist, 2*H]
+                emb_extend = self.ahidden_Q(sup_phasor)  # [B, hist, H]
+                emb_K_tail = self.emb_K(emb_extend)  # [B, hist, H]
+                emb_K_tail_norm = emb_K_tail / (emb_K_tail.norm(dim=-1, keepdim=True) + 1e-6)
+                emb_V_tail = self.emb_V(emb_extend)   # [B, hist, H]
+                #emb_V_tail_norm = emb_V_tail / (emb_V_tail.norm(dim=-1, keepdim=True) + 1e-6)
+                
+            else:
+                emb_extend = None        
+            
+            
+            if target_ids is not None:
+                T_out = target_ids.shape[1]
+                out_embeds = self.embedding(target_ids)
+                outputs = []
+                current_token = torch.full((B,), self.sos_idx, device=input_ids.device, dtype=torch.long)
+                emb = self.embedding(current_token)
+                out_embeds = torch.cat([emb.unsqueeze(1), out_embeds], dim=1)
+                emb_hidden = torch.tanh(self.encoder_proj(out_embeds))
+                emb_hr, emb_hi = self.rotation(emb_hidden, torch.zeros_like(emb_hidden), self.angle_step, None)
+                emb_hidden = torch.stack([emb_hr, emb_hi], dim=-2)
+
+              
+                
+
+                for t in range(T_out):
+                    alpha = torch.sigmoid(self.alpha_proj(hidden_out[:, 0, :]))
+                    hidden_out = torch.stack([alpha, alpha], dim=1) * hidden_out + F.silu(emb_hidden[:, t, :, :])
+
+                    # ========== compute Q ==========
+                    phase = torch.atan2(hidden_out[:, 1, :], hidden_out[:, 0, :] + 1e-8)
+                    h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+                    h_phasor = torch.cat([h_cos, h_sin], dim=-1)  # [B, 2*H]
+                    hidden_Q = torch.tanh(self.ahidden_Q(h_phasor))  # [B, H]
+                    # normalize
+                    hidden_Q_norm = hidden_Q / (hidden_Q.norm(dim=-1, keepdim=True) + 1e-6)
+                   
+                    # vocab distance + attention
+                    dist_sq_vocab = torch.cdist(hidden_Q_norm, emb_K_vocab_norm, p=2) ** 2  # [1, vocab]
+                    attn_vocab = torch.softmax(-dist_sq_vocab, dim=-1)  # [1, vocab]
+                    emb_out_vocab = torch.matmul(attn_vocab,emb_V_vocab)  # [1, H]
+                   
+                    # ========== hist tail ==========
+                    #    historical step
+                    if emb_extend is not None:
+                        
+                        # tail distanced attention
+                        dist_sq_tail = torch.cdist(hidden_Q_norm.unsqueeze(1), emb_K_tail_norm, p=2).squeeze(1) ** 2  # [B, hist,hit]
+                        attn_tail = torch.softmax(-dist_sq_tail, dim=-1)  # [B, hist]
+
+                        # ========== merge vocab and tail==========
+                        # method：compute vocab attention and tail attention，and merge again
+                        
+                        emb_out_tail = torch.matmul(attn_tail.unsqueeze(1), emb_V_tail).squeeze(1)  # [B, H]
+                        
+                        
+                        tail_weight = torch.sigmoid(self.tail_weight)
+                        #print(tail_weight.shape)
+                        emb_out =  emb_out_vocab + tail_weight * emb_out_tail
+                        
+                      
+                        
+                    else:
+                        emb_out = emb_out_vocab  # [1, H]
+
+                   
+                    logits = self.output_proj(emb_out)
+                    outputs.append(logits)
+
+                    # Teacher forcing 
+                    emb = out_embeds[:, t, :]
+                    magnitude = torch.sqrt(hidden_out[:, 0, :]**2 + hidden_out[:, 1, :]**2 + 1e-8)
+                    hidden_out = hidden_out / magnitude.unsqueeze(1)
+
+                return torch.stack(outputs, dim=1)
+
+            else:
+                # ========== reasoning ==========
+                outputs = []
+                current_token = torch.full((B,), self.sos_idx, device=input_ids.device, dtype=torch.long)
+                pre_angle = -self.angle_step
+                for t in range(self.max_len):
+                    emb = self.embedding(current_token)
+                    emb_hidden = torch.tanh(self.encoder_proj(emb))
+                    emb_hr, emb_hi = self.rotation(emb_hidden, torch.zeros_like(emb_hidden), self.angle_step, pre_angle=pre_angle)
+                    emb_hidden = torch.stack([emb_hr, emb_hi], dim=-2)
+                    alpha = torch.sigmoid(self.alpha_proj(hidden_out[:, 0, :]))
+                    hidden_out = torch.stack([alpha, alpha], dim=1) * hidden_out + F.silu(emb_hidden)
+
+                    # ========== compute Q ==========
+                    phase = torch.atan2(hidden_out[:, 1, :], hidden_out[:, 0, :] + 1e-8)
+                    h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+                    h_phasor = torch.cat([h_cos, h_sin], dim=-1)  # [B, 2*H]
+                    hidden_Q = torch.tanh(self.ahidden_Q(h_phasor))  # [B, H]
+                    
+                    # normalize
+                    hidden_Q_norm = hidden_Q / (hidden_Q.norm(dim=-1, keepdim=True) + 1e-6)
+                   
+                    # vocab distanced attention
+                    dist_sq_vocab = torch.cdist(hidden_Q_norm, emb_K_vocab_norm, p=2) ** 2  # [1, vocab]
+                    attn_vocab = torch.softmax(-dist_sq_vocab, dim=-1)  # [1, vocab]
+                    emb_out_vocab = torch.matmul(attn_vocab,emb_V_vocab)  # [1, H]
+                  
+                    # ========== hist part ==========
+                    if emb_extend is not None:
+
+                        
+                        dist_sq_tail = torch.cdist(hidden_Q_norm.unsqueeze(1), emb_K_tail_norm, p=2).squeeze(1) ** 2  # [B, hist,hit]
+                       
+                        attn_tail = torch.softmax(-dist_sq_tail, dim=-1)  # [B, hist]
+
+                        
+                        
+                        emb_out_tail = torch.matmul(attn_tail.unsqueeze(1), emb_V_tail).squeeze(1)  # [B, H]
+                        
+                       
+                        tail_weight = torch.sigmoid(self.tail_weight)
+                        
+                        emb_out = emb_out_vocab + tail_weight * emb_out_tail
+                        
+                      
+                        
+                    else:
+                        emb_out = emb_out_vocab  # [1, H]
+
+                   
+                    logits = self.output_proj(emb_out)
+                    next_token = torch.argmax(logits, dim=-1)
+                    outputs.append(next_token)
+                    current_token = next_token
+                    pre_angle += self.angle_step
+                    magnitude = torch.sqrt(hidden_out[:,0,:]**2 + hidden_out[:,1,:]**2 + 1e-8)
+                    hidden_out = hidden_out/magnitude.unsqueeze(1)
+
+                return torch.stack(outputs, dim=1)
+        else:
+            # ========== non teacher forcing ==========
+            emb_out_norm = F.normalize(hidden_out[:, 0, :], p=2, dim=-1)
+            embedding_norm = F.normalize(self.embedding.weight, p=2, dim=-1)
+            logits = torch.matmul(emb_out_norm, embedding_norm.T)
+            if target_ids is not None:
+                return logits
+            else:
+                return torch.argmax(logits, dim=-1)
+
+    
+'''
     def forward(self, input_ids, target_ids=None):
         B, T_in = input_ids.shape
         x = self.embedding(input_ids)
@@ -589,15 +771,16 @@ class CSP_Seq2Seq(nn.Module):
             x = block(x)
 
         # extract phase for initial of decode
-        '''
-        phase = torch.atan2(x[:, :, 1,:], x[:, :, 0,:] + 1e-8)
-        h_cos, h_sin = torch.cos(phase), torch.sin(phase)
-        h_phasor = torch.cat([h_cos, h_sin], dim=-1)
-        hidden_out = torch.tanh(self.phase_proj(h_phasor))  # [B, H] the last hidden state
-        '''
+        #
+        #phase = torch.atan2(x[:, :, 1,:], x[:, :, 0,:] + 1e-8)
+        #h_cos, h_sin = torch.cos(phase), torch.sin(phase)
+        #h_phasor = torch.cat([h_cos, h_sin], dim=-1)
+        #hidden_out = torch.tanh(self.phase_proj(h_phasor))  # [B, H] the last hidden state
+        #'
         
         if self.train_method == 'teacher_forcing':
             hidden_out = x[:,-1,:,:]
+            
             if target_ids is not None:
                 T_out = target_ids.shape[1]
                 out_embeds = self.embedding(target_ids)
@@ -619,27 +802,38 @@ class CSP_Seq2Seq(nn.Module):
                     #emb_out = torch.tanh(self.decoder_proj(h_phasor))
                     #torch.matmul(self.embedding.weight, self.decision_kernel
                     #logits = self.output_proj(emb_out)
-                    '''
-                    perform query, key match between recurrent_hidden_state(query) and embeddings(key). 
-                    '''
+                    
+                    #perform query, key match between recurrent_hidden_state(query) and embeddings(key). 
+                    
                     #pad_mask = torch.ones(self.vocab_size, device=self.embedding.weight.device)
                     #pad_mask[self.pad_idx] = 0  # <PAD> 位置为 0
                     
                     hidden_Q  =  self.ahidden_Q(h_phasor)   # [B,embed_dim]
-                    frozen_embedding = self.embedding.weight.detach()
+                    frozen_embedding = self.embedding.weight.detach().unsqueeze(0).expand(B, -1, -1)
                     
+                    if self.extend_historical>0:
+                        his_sup    = x[:,-self.extend_historical:-1,:,:]
+                        phase_sup = torch.atan2(his_sup[:,:, 1,:],his_sup[:,:, 0,:]+1e-8)
+                        sup_cos, sup_sin = torch.cos(phase_sup), torch.sin(phase_sup)
+                        sup_phasor = torch.cat([sup_cos, sup_sin], dim=-1)
+                        emb_extend = self.ahidden_Q(sup_phasor)
+                        
+                        frozen_embedding = torch.cat([frozen_embedding,emb_extend ],dim=1)  
+                        #                                [B,vocab,vocab_dim]         [B,hist,vocab_dim]
+                        
                     emb_K     = self.emb_K(frozen_embedding) # [vocabsize, embed_dim]
                     hidden_Q = hidden_Q / (hidden_Q.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
                     emb_K = emb_K / (emb_K.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
                     #logits  =  torch.matmul(hidden_Q,emb_K.T)
                     
                     
-                    dist_sq = torch.cdist(hidden_Q, emb_K, p=2) ** 2  # [B, vocab_size]
+                    dist_sq = torch.cdist(hidden_Q, emb_K, p=2) ** 2  # [B, vocab_size+hist]
                     attn_voc = torch.softmax(-dist_sq, dim=-1) 
+                                                               #[B,vocabsize+hist]
                     
-                    
-                    emb_V     =  self.emb_V(frozen_embedding)  # [vocabsize , embed_dim]
-                    emb_out   =  torch.matmul(attn_voc,emb_V+frozen_embedding) #[B , embed_dim]
+                    emb_V     =  self.emb_V(frozen_embedding)  # [B, vocabsize+hist , embed_dim]
+                    emb_out = torch.matmul(attn_voc.unsqueeze(1), emb_V).squeeze(1)  #[B , embed_dim]
+                    #print(emb_out.shape)
                     
                     logits    =  self.output_proj(emb_out)
                     
@@ -668,24 +862,32 @@ class CSP_Seq2Seq(nn.Module):
                     #hidden_out = torch.tanh(self.phase_proj(h_phasor))
                     #emb_out = torch.tanh(self.decoder_proj(h_phasor))
                     #logits = self.output_proj(emb_out)
-                    '''
-                    perform query, key match between recurrent_hidden_state(query) and embeddings(key). 
-                    '''
+                    
+                    #perform query, key match between recurrent_hidden_state(query) and embeddings(key). 
+                    
                     #pad_mask = torch.ones(self.vocab_size, device=self.embedding.weight.device)
                     #pad_mask[self.pad_idx] = 0  # <PAD> 位置为 0
                     hidden_Q  =  self.ahidden_Q(h_phasor)    # [B,embed_dim]
-                    frozen_embedding = self.embedding.weight.detach()
+                    frozen_embedding = self.embedding.weight.detach().unsqueeze(0).expand(B, -1, -1)
+                    if self.extend_historical>0:
+                        his_sup    = x[:,-self.extend_historical:-1,:,:]
+                        phase_sup = torch.atan2(his_sup[:,:, 1,:],his_sup[:,:, 0,:]+1e-8)
+                        sup_cos, sup_sin = torch.cos(phase_sup), torch.sin(phase_sup)
+                        sup_phasor = torch.cat([sup_cos, sup_sin], dim=-1)
+                        emb_extend = self.ahidden_Q(sup_phasor)
+                        frozen_embedding = torch.cat([frozen_embedding,emb_extend ],dim=1)  
+                    
                     
                     emb_K     =  self.emb_K(frozen_embedding) # [vocabsize, embed_dim]
                     hidden_Q = hidden_Q / (hidden_Q.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
                     emb_K = emb_K / (emb_K.norm(dim=-1, keepdim=True) + 1e-6)  # 单位向量
                     #logits  =  torch.matmul(hidden_Q,emb_K.T)
                     
-                    dist_sq = torch.cdist(hidden_Q, emb_K, p=2) ** 2  # [B, vocab_size]
+                    dist_sq = torch.cdist(hidden_Q, emb_K, p=2) ** 2  # [B, vocab_size+hist]
                     attn_voc = torch.softmax(-dist_sq, dim=-1) 
                     
-                    emb_V     =  self.emb_V(frozen_embedding)  # [vocabsize , embed_dim]
-                    emb_out   =  torch.matmul(attn_voc,emb_V+frozen_embedding) #[B , embed_dim]
+                    emb_V     =  self.emb_V(frozen_embedding)  # [vocabsize+hist , embed_dim]
+                    emb_out = torch.matmul(attn_voc.unsqueeze(1), emb_V).squeeze(1) #[B , embed_dim]
                     
                     
                     logits    =  self.output_proj(emb_out)
@@ -717,7 +919,7 @@ class CSP_Seq2Seq(nn.Module):
                 # reasoning： elect the maximum element index
                 outputs = torch.argmax(logits, dim=-1)  # [B, T]
                 return outputs
-
+'''
             
         
     
