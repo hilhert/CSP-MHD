@@ -1,0 +1,25 @@
+{
+    "block": {
+        "layers": [
+            {"name": "LinearMhRBFKAttnLayer", "num_heads": 4, "hidden_dim": 256},
+            {"name": "LinearMhRBFKAttnLayer", "num_heads": 4, "hidden_dim": 256},
+            {"name": "LinearMhRBFKAttnLayer", "num_heads": 4, "hidden_dim": 256},
+            {"name": "CSP_Hidden_FAST", "num_heads": 4, "hidden_dim": 256}
+        ]
+    },
+    
+    "head": {
+        "name": "CSP_HEAD",
+        "extend_historical": 2
+    },
+    
+    "global": {
+        "embed_dim" :   64,
+        "hidden_dim":  256,
+        "block_num" :    3,
+        "max_len"   :   40, 
+        "angle_step": 0.05,
+        "identify"  : "AAAP_B3"
+    }
+
+}

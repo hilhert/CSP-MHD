@@ -4,16 +4,19 @@ import torch.nn.functional as F
 import math
 
 
-class LinearMhRBFKAttnLayer(nn.Module):
+class LinearMh_QK_RBFKAttnLayer(nn.Module):
     def __init__(self, num_heads, hidden_dim, p=0.1):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
         self.logp = nn.Parameter(torch.tensor(0.5))
-
+        self.logpm = nn.Parameter(torch.tensor(0.5))
         # K_proj * V_proj =  B: [num_heads, head_dim, head_dim]
        
-        self.B = nn.Parameter(torch.randn(num_heads, self.head_dim, self.head_dim) * 0.01)
+        self.K = nn.Parameter(torch.randn(num_heads, self.hidden_dim, hidden_dim) * 0.01)
+        
+        self.Expand = nn.Linear(head_dim,hidden_dim)
+        
         self.B_FUSE = nn.Parameter(torch.randn(num_heads,num_heads) * 0.01)
         self.gate = nn.Parameter(torch.randn(hidden_dim) * 0.01)
         
@@ -31,12 +34,13 @@ class LinearMhRBFKAttnLayer(nn.Module):
 
         # 1. take both real part and imag part to build attentions，multi_head
         z , zi  =   x[:, :, 0, :], x[:, :, 1, :]  # [B, T, H]
-        z   =   z.view(B, T, self.num_heads, d)  # [B, T, num_heads, d]
-        zi  =   zi.view(B, T, self.num_heads, d)   
+
+        z , zi   =   self.Expand(z.view(B, T, self.num_heads, d)), self.Expand(zi.view(B, T, self.num_heads, d))  # [B, T, num_heads, d]
         
+        QK = torch.matmul(self.K, self.K.T) + torch.exp(self.logpm) * (torch.eye(H).detach())
         # 2. compute the attention score
-        zB    = torch.einsum('bthd, hdd -> bthd', z, self.B)  # [B, T, num_heads, d]
-        ziB   = torch.einsum('bthd, hdd -> bthd', zi, self.B)
+        zB    = torch.einsum('bthd, hdd -> bthd', z,QK)  # [B, T, num_heads, d]
+        ziB   = torch.einsum('bthd, hdd -> bthd', zi,QK)
         
         dist_unformulated_r = torch.einsum('bthd, bHhd -> bthH', zB, z).permute(0,2,1,3)  # [B, num_heads,T, T]
         dist_unformulated_i = torch.einsum('bthd, bHhd -> bthH', ziB, zi).permute(0,2,1,3)  # [B, num_heads,T, T]
@@ -103,6 +107,114 @@ class LinearMhRBFKAttnLayer(nn.Module):
         x_out = x_out / magnitude.unsqueeze(2)
 
         return x_out
+
+
+class LinearMhRBFKAttnLayer(nn.Module):
+    def __init__(self, num_heads, hidden_dim, p=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.logp = nn.Parameter(torch.tensor(0.5))
+
+        # K_proj * V_proj =  B: [num_heads, head_dim, head_dim]
+       
+        self.B = nn.Parameter(torch.randn(num_heads, self.head_dim, self.head_dim) * 0.01)
+        self.B_FUSE = nn.Parameter(torch.randn(num_heads,num_heads) * 0.01)
+        self.gate = nn.Parameter(torch.randn(hidden_dim) * 0.01)
+        self.dp    = nn.Parameter(torch.tensor(-5.0))
+
+    def forward(self, x):
+        """
+        x: [B, T, 2, H]  0: real, 1: imag
+        """
+        B, T, _, H = x.shape
+        d = self.head_dim
+        #if self.causal_mask is None or self.causal_mask.size(0) != T:
+        mask = torch.tril(torch.ones(T, T, device=x.device), diagonal=0).detach()  # [T, T]
+        causal_mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, T, T]
+        
+
+        # 1. take both real part and imag part to build attentions，multi_head
+        z , zi  =   x[:, :, 0, :], x[:, :, 1, :]  # [B, T, H]
+        z   =   z.view(B, T, self.num_heads, d)  # [B, T, num_heads, d]
+        zi  =   zi.view(B, T, self.num_heads, d)   
+        #diag = torch.eye(d, device=x.device).unsqueeze(0)  # [1, d, d]
+        Bb = torch.matmul(self.B,self.B.permute(0,2,1)) #+ torch.sigmoid(self.dp)*diag
+        
+        # 2. compute the attention score
+        zBh   =  torch.einsum('bthd, hdd -> bthd', z, self.B)  # [B, T, num_heads, d]
+        ziBh   =  torch.einsum('bthd, hdd -> bthd', zi, self.B)
+        
+        dist_unformulated_r = torch.einsum('bthd, bHhd -> bthH', zBh, z).permute(0,2,1,3)  # [B, num_heads,T, T]
+        dist_unformulated_i = torch.einsum('bthd, bHhd -> bthH', ziBh, zi).permute(0,2,1,3)  # [B, num_heads,T, T]
+        dist_unformulated  = dist_unformulated_r + dist_unformulated_i  # Regard as dual channel info!
+        #attn_scores = torch.sigmoid(attn_scores)
+        diag  = torch.diagonal(dist_unformulated,dim1=2,dim2=3) #[B,num_heads,T]
+        
+        dist = diag.unsqueeze(-1) + diag.unsqueeze(-2) - 2*dist_unformulated  # mahalonobis distance is all positive 
+        
+        
+        
+        # 3. extract sub diag （for tree penalty）
+        subdiag = torch.diagonal(dist, offset=1, dim1=2, dim2=3)  # [B, num_heads, T-1] 
+        #subdiag = -subdiag
+        #assert not torch.any(subdiag < 0), f"subdiag has unsuitable values! "
+        #assert not torch.any(subdiag > 1), f"subdiag has unsuitable values! "
+        # 4. tree penaly construct using accum differ matrix (log sum exp)!
+        accu = torch.cumsum(torch.exp(subdiag), dim=-1)  # [B, num_heads, T-1]
+        accu = torch.cat([torch.zeros(B, self.num_heads, 1, device=x.device), accu], dim=-1)  # [B, num_heads, T]
+        #print(accu[0,0,:])
+        C = accu.unsqueeze(-1) - accu.unsqueeze(-2)  # [B, num_heads, T, T]# [B, num_heads, T, T]
+        C = C.masked_fill(causal_mask == 0, 0)
+        #assert not torch.any(C < 0), f"C has negative values! min: {C.min().item()}"
+        C = torch.log(1+C+1e-6)  # sim max, log_sum_exp
+        #assert not torch.any(C < 0), f"C has negative values after log! min: {C.min().item()}"
+        # 5. apply penalty
+        #attn_scores = torch.sigmoid(attn_scores)
+        
+        dist_rect = dist + torch.exp(self.logp) * C
+        
+        # 6. cross head attention!
+        sim_maxdist_ph = C[:,:,-1,0] # [B, num_heads]  sim maxium scores in subdiag selected!
+        #c_dist         = torch.einsum('bh, bH -> bhH', sim_maxdist_ph, sim_maxdist_ph)*self.B_FUSE
+        
+        zBF = torch.einsum('bh, hh -> bh', sim_maxdist_ph, self.B_FUSE)  # [B, num_heads]
+        cross_attn = torch.einsum('bh, bH -> bhH', zBF, sim_maxdist_ph)  # [B, num_heads, num_heads]
+        cross_attn = 1+F.silu(cross_attn)
+        cross_attn = cross_attn / (torch.sum(cross_attn, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, num_heads]
+
+        # update synthetic dist and generate attn acores! 
+        dist_mixture = torch.einsum('bhtT, bhh -> bhtT', dist_rect, cross_attn)  # [B, num_heads, T, T]
+        attn_scores = torch.exp(-dist_mixture)
+        
+        #attn_scores = torch.exp(-(torch.sin(dist_mixture)+1)/2)  # May help ... Seriously!
+        
+        
+        # causual mask + normalize
+        attn_scores = attn_scores.masked_fill(causal_mask == 0, 0)
+        attn_scores = attn_scores / (torch.sum(attn_scores, dim=-1, keepdim=True) + 1e-6)  # [B, num_heads, T, T]
+       
+        #bThd  bhtT  0,2,3,1
+        zB_f = torch.einsum('bThd, btTh -> bhtd', z, attn_scores.permute(0,2,3,1))
+        ziB_f = torch.einsum('bThd, btTh -> bhtd', zi, attn_scores.permute(0,2,3,1))
+
+        # Dyanmic the attend confused attention! 
+        #attn_final = attn_scores.mean(dim=1) # [B, T, T]
+        # experimental
+        
+        z_weighted =  torch.cat([zB_f.view(B,T,-1), ziB_f.view(B,T,-1)],dim=-1)
+        # 7. update x
+        x_flat = x.view(B, T, -1)
+        
+        #x_flat = torch.stack([zB,ziB],dim=-2).view(B,T,-1)
+        #z_flat = torch.cat([zBh.view(B,T,-1), ziBh.view(B,T,-1)],dim=-1)
+        #z_weighted = torch.matmul(attn_final, z_flat).view(B, T, 2, H)
+
+        z_out = x_flat.view(B,T,2,H) * torch.sigmoid(self.gate) + F.silu(z_weighted.view(B,T,2,H))
+        magnitude = torch.sqrt(z_out[:, :, 0, :]**2 + z_out[:, :, 1, :]**2 + 1e-8)
+        z_out = z_out / magnitude.unsqueeze(2)
+
+        return z_out
 
 
 
@@ -347,6 +459,86 @@ class ComplexPRLayer_ATTENTION(nn.Module):
     
     
 
+class CSP_Hidden_FAST(nn.Module):
+    """
+    Complex Propagator with Rotation block.
+
+    Components:
+    - Rotate: element-wise complex rotation
+    - Recur: complex-valued linear recurrence
+    - Skip: gated skip connection with SiLU activation
+    - Norm: element-wise complex normalization (unit circle projection)
+    """
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        # Rotation
+        self.theta_proj = nn.Linear(2*hidden_dim, 1)
+
+        # Recurrence: input projection B (shared for real and imag)
+        self.B_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        # Decay factor (alpha = exp(log_alpha), initialized to 1)
+        self.delta_proj =  nn.Linear(2*hidden_dim, 1)
+        self.gamma_proj = nn.Linear(2*hidden_dim, 1)
+
+        # Skip gate (per-dimension, initialized to 0.5)
+        self.skip_gate = nn.Parameter(torch.ones(hidden_dim) * 0.5)
+
+        # Initialization
+        nn.init.zeros_(self.theta_proj.weight)
+        nn.init.zeros_(self.theta_proj.bias)
+
+    def forward(self, x):
+        """
+        Args:
+            x: [B, T, 2, H]  0: real, 1: imag
+        Returns:
+            x: [B, T, 2, H]
+        """
+        B, T, _, H = x.shape
+
+        #1. Rotation with imposed statistics!
+  
+        theta_all = torch.tanh(self.theta_proj(torch.cumsum(x.view(B,T,-1),dim=1)/torch.arange(1,T+1,device=x.device).unsqueeze(-1).unsqueeze(0).detach())) * math.pi  # [B, T, 1]
+        cos_a, sin_a = torch.cos(theta_all), torch.sin(theta_all)  # [B, T, 1]
+
+        # construct of rotation matrix
+        Rot1 = torch.cat([cos_a, -sin_a], dim=-1)  # [B, T, 1, 2]
+        Rot2 = torch.cat([sin_a, cos_a], dim=-1)   # [B, T, 1, 2]
+        Rot = torch.stack([Rot1, Rot2], dim=-2)    # [B, T, 2, 2]
+
+       
+        x_rot = torch.einsum('btih, btji -> btjh', x, Rot)  
+        
+        
+        #2. Element construct after rotation
+        gamma_all       =     (1 + torch.sin(self.gamma_proj(x_rot.view(B,T,-1)))).unsqueeze(-1)/2 
+        x_g             =     self.B_proj(x_rot)* gamma_all
+        
+        
+        #3. Mamba style recur
+        delta_all       =     F.softplus(self.delta_proj(x_g.view(B,T,-1)))  # [B, T, 1]
+        alpha_all       =     torch.exp(-delta_all).unsqueeze(-1)                # [B, T, 1] [B, T, 1]
+        alpha_cumprod   =     torch.cumprod(alpha_all,dim=1) 
+        alpha_cumpshift =     torch.cat([torch.ones(B,1,1,1,device=x.device).detach(),alpha_cumprod[:,:-1,:,:]],dim=1) 
+        
+        x_recur = alpha_cumprod*torch.cumsum(x_g / (alpha_cumpshift+1e-9), dim=1)
+        
+       
+        
+        #4. Skip connection with elementwise magnitude normalization
+        gate = torch.sigmoid(self.skip_gate) 
+        x_out = x * gate + F.silu(x_recur)       
+        magnitude = torch.sqrt(x_out[:, :, 0, :]**2 + x_out[:, :, 1, :]**2 + 1e-8)
+        x_out = x_out / magnitude.unsqueeze(-2)  
+
+        return x_out
+    
+    
+    
+    
 
 class ComplexPRLayer(nn.Module):
     """
@@ -515,6 +707,8 @@ class CSP_BLOCK(nn.Module):
             print("Linear Tree Atten mode received! I'm createing tree attention style hidden layer!")
         elif model_mode == "atten_rbf":
             self.layers = nn.ModuleList([LinearMhRBFKAttnLayer(n_head, self.hidden_dim, p=0.1) for _ in range(num_layers)])
+        elif model_mode=="mh_qk_rbf":
+            self.layers = nn.ModuleList([LinearMh_QK_RBFKAttnLayer(n_head, self.hidden_dim, p=0.1) for _ in range(num_layers)])
         else:
             self.layers = nn.ModuleList([ComplexPRLayer(self.hidden_dim) for _ in range(num_layers)])
             print("No known mode explicted! Draw back to relax mode with shared weights and per domain activate!")

@@ -23,43 +23,38 @@ from utils import (
 
 
 def main():
-    experiment,data_mode,model_mode = 'symseq','complete',"atten_rbf" # or atten_mhead , atten, 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(base_dir, experiment)
-    fig_path = os.path.join(model_path, 'figure')
-    os.makedirs(model_path, exist_ok=True)
-    os.makedirs(fig_path, exist_ok=True)
-    log_file = setup_logging()
-    exp_file = "{}_{}_{}.json".format(experiment,model_mode,data_mode)
-    exp_path = os.path.join(fig_path,exp_file)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    # Airthmetic Data Set, n reperesents the modular number
-   
-    model_name = "{}_{}_{}.pt".format(experiment,model_mode,data_mode)
-    cp_path = os.path.join(model_path,model_name)
-    '''
-    model param
-    '''
-    hidden_dim = 256
-    n_head = 8
-    num_layers = 16
-    embed_dim  = 64
-    '''
-    data param
-    '''
     
+    # training params
     trn_ba_sz  =128
     tst_ba_sz  = trn_ba_sz//2
-    v_train    = 256000
+    v_train    = 25600
     v_test     = v_train//10
     n          =9    #modular number
     max_digits = 1
     max_val    =9
     min_val    =0
-    max_terms  =3
+    max_terms  =3 
     epochs = 50
+   
     
+    experiment,data_mode = 'symseq','complete' # or atten_mhead , atten, 
+    # load model config file 
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(base_dir, experiment)
+    
+    os.makedirs(model_path, exist_ok=True)
+    
+    model_config_file  =  os.path.join(model_path,"config.json") 
+    vocab_config_file  =  os.path.join(model_path,"vocab.json")
+    try:
+        with open(model_config_file,"r") as f:
+            model_config = dict(**json.load(f))
+        
+    except:
+        print("Model config file does not exist, please prepare one at model path named config.json with valid json format!")
+    
+    #prepare datasets
+    # Airthmetic Data Set, n reperesents the modular number
     gen = ModNArithmeticGenerator(n=n,simple = False)
     train_dataset = SymbolicArithmeticDataset(
         v_train, max_terms=max_terms, max_digits=max_digits, min_val=min_val, max_val=max_val,
@@ -70,31 +65,47 @@ def main():
         generate_expression_func=gen,vocab=None ,mode=data_mode
     )
     
-    '''
-    print(f"char2idx: {train_dataset.char2idx}")
     
-    for i,item in enumerate(train_dataset):
-        print(item)
-        break
     
-    return
-    '''
     
+    if not os.path.exists(vocab_config_file):
+        vocab_config = train_dataset.char2idx
+        vocab_config["vocab_size"] = len(train_dataset.char2idx)
+        with open(vocab_config_file,"w") as f:     
+            json.dump(train_dataset.char2idx, f ,default=lambda o: o.__dict__, indent=4 )
+            
+    else:
+        with open(vocab_config_file,"r") as f:
+            vocab_config = dict(**json.load(f))
+        
+   
     train_loader = DataLoader(train_dataset, batch_size=trn_ba_sz, shuffle=True,drop_last=True)
-    test_loader = DataLoader(test_dataset, batch_size=tst_ba_sz, shuffle=False,drop_last=True)
-
-    # get special token index
-    pad_idx = train_dataset.char2idx['<PAD>']
-    eos_idx = train_dataset.char2idx['<EOS>']
-    sos_idx = train_dataset.char2idx['<SOS>']
-    print(f" sos_idx:{sos_idx}\n pad_idx:{pad_idx}\n eos_idx:{eos_idx} ")
+    test_loader  = DataLoader(test_dataset, batch_size=tst_ba_sz, shuffle=False,drop_last=True)
     
-
-    # model param
-    vocab_size = train_dataset.vocab_size
+    
+    
+    fig_path = os.path.join(model_path, "./figure")
+    os.makedirs(fig_path, exist_ok=True)
 
     
-    model = CSP_Seq2Seq(vocab_size, head_dim = hidden_dim//n_head,n_head=n_head, num_layers=num_layers,embed_dim=embed_dim,sos_idx=sos_idx,pad_idx=pad_idx,eos_idx=eos_idx,model_mode=model_mode,extend_historical=2).to(device)
+    exp_file = "{}_{}_{}.json".format(experiment,model_config["global"]["identify"],data_mode)
+    exp_path = os.path.join(fig_path,exp_file)
+        
+    if os.path.exists(exp_path):
+        with open(exp_path) as f:
+            experiment_results = dict(**json.load(f))
+       
+    
+    model_name = "{}_{}_{}.pt".format(experiment,model_config["global"]["identify"],data_mode)
+    cp_path = os.path.join(model_path,model_name)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+ 
+    
+    model = CSP_Seq2Seq( model_config, vocab_config).to(device)
+    
+    
+    # Load model if exists! 
     checkpoint=None
     if os.path.exists(cp_path):
         print(f"Loading existence model: {cp_path}")
@@ -103,8 +114,8 @@ def main():
         model.load_state_dict(state_dict)
         start_epoch = checkpoint.get('epoch', 0)
         with torch.no_grad():
-            model.embedding.weight[sos_idx].zero_()
-            model.embedding.weight[sos_idx].requires_grad = False
+            model.embedding.weight[vocab_config["<SOS>"]].zero_()
+            model.embedding.weight[vocab_config["<SOS>"]].requires_grad = False
       
     else:
         print("New Model Created")
@@ -117,8 +128,10 @@ def main():
     else:
         experiment_results = {"losses":[],"grad_norms":[],"accs":[]}
     
-    #model = CSP_Seq2Seq(vocab_size, hidden_dim=64, num_layers=7).to(device)
+   
     print(f"numel of params: {sum(p.numel() for p in model.parameters()):,}")
+    
+    
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3,weight_decay=5e-4)
     if checkpoint and 'optimizer_state_dict' in checkpoint:
@@ -127,29 +140,16 @@ def main():
     
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
     #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=20, factor=0.5)
-    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs*1.5, eta_min=1e-5)
-    #optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx,reduction='none')
+    criterion = nn.CrossEntropyLoss(ignore_index=vocab_config["<PAD>"],reduction='none')
 
-    # traning epoches
    
     
     best_accu = 0.0
-    #focal = {"alpha":0.25, "gamma":2.0}
+   
     
     for epoch in range(start_epoch,start_epoch+epochs):
         loss,grad_norm = train_model_seq(model, train_loader, optimizer, criterion, device=device,focal=None)
-        acc = evaluate_seq(model, test_loader, device, pad_idx, eos_idx,debug=True)
-        #print(f"Epoch {epoch+1}: Loss={loss:.4f}, Acc={acc:.4f}")
-        #best_acc = 0
-        '''
-        if epoch % 10 == 0:
-            test_accs.append(acc)
-            #scheduler.step(test_acc)
-            if  acc > best_acc:
-                save_checkpoint(model, optimizer, epoch, loss, acc, cp_path)
-            #log(f"Epoch {epoch+1}: Loss={loss:.4f}, Acc={acc:.4f})
-        '''
+        acc = evaluate_seq(model, test_loader, device, vocab_config["<PAD>"], vocab_config["<EOS>"],debug=True)
         print(f"Epoch {epoch+1}: Loss={loss:.4f}, Acc={acc:.4f}")
         experiment_results["losses"].append(loss)
         experiment_results["grad_norms"].append(grad_norm)
@@ -177,7 +177,7 @@ def main():
         with open(exp_path,'w') as f:
             json.dump(experiment_results, f ,default=lambda o: o.__dict__, indent=4 )
             #f.write(ser_exp)
-  
+    
 
 if __name__ == "__main__":
     main()
