@@ -249,7 +249,7 @@ class SymbolicArithmeticDataset(Dataset):
             self._generate_expression = generate_expression_func
         
         self.samples = self._generate(num_samples, max_terms, max_digits, min_val, max_val)
-            
+        self.max_len = max(len(s['input']) for s in self.samples) + 10
         
     
     

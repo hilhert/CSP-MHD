@@ -27,7 +27,7 @@ def main():
     # training params
     trn_ba_sz  =128
     tst_ba_sz  = trn_ba_sz//2
-    v_train    = 25600
+    v_train    = 256000
     v_test     = v_train//10
     n          =9    #modular number
     max_digits = 1
