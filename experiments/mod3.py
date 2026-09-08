@@ -35,7 +35,7 @@ def main():
         epochs=300, lr=0.001, weight_decay=1e-4 ,device=device, loss_fn=None,cp_path=cp_path
     )
     
-    # ★★★ 绘图 ★★★
+    # ★★★ plot ★★★
     plot_training_curves(losses, accs,save_path=fig_path)
     plot_grokking_analysis(accs, grad_norms, losses,save_path=fig_path)
     

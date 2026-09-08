@@ -13,10 +13,10 @@ def save_checkpoint(model, optimizer, epoch, loss, f1, filepath):
         'loss': loss,
         'f1': f1,
     }
-    # 保存 .pt 训练全量状态
+    # save .pt checkpoint
     torch.save(checkpoint, filepath)
     
-    # 剥离可能存在的后缀，确保导出 pure_name.safetensors
+    # save safetensors
     base_path, _ = os.path.splitext(filepath)
     safetensors_path = base_path + ".safetensors"
     
@@ -24,49 +24,49 @@ def save_checkpoint(model, optimizer, epoch, loss, f1, filepath):
     
 def load_checkpoint(filepath, model, optimizer=None, device='cpu'):
     """
-    【恢复训练专用】从 .pt 检查点加载模型与优化器状态。
+    resotre traning from .pt or .safetensors
     
-    参数:
-        filepath: .pt 检查点文件路径 (例如 "checkpoints/best_model.pt")
-        model: 已初始化的 PyTorch 模型对象
-        optimizer: 已初始化的 PyTorch 优化器对象 (可选)
+    params:
+        filepath: .pt location of checkpoint (i.e "checkpoints/best_model.pt")
+        model: the initialized PyTorch model
+        optimizer: the initialized PyTorch optimizer (optional)
         
-    返回:
+    return:
         model, optimizer, start_epoch, f1
     """
     if not os.path.exists(filepath):
-        raise FileNotFoundError(f"找不到检查点文件: {filepath}")
+        raise FileNotFoundError(f"could not find model file: {filepath}")
         
-    print(f"[Checkpoint] 正在恢复训练状态: {filepath}")
+    print(f"[Checkpoint] restord checkpoint: {filepath}")
     checkpoint = torch.load(filepath, map_location=device)
     
-    # 1. 恢复模型权重
+    # 1. restore model weight
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # 2. 恢复优化器状态 (如果传入了 optimizer)
+    # 2. restore optimizer state (if saved)
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-    start_epoch = checkpoint.get('epoch', 0) + 1  # 下轮继续
+    start_epoch = checkpoint.get('epoch', 0) + 1  # continue from next epoch
     loss = checkpoint.get('loss', 0.0)
     f1 = checkpoint.get('f1', 0.0)
     
-    print(f"[Checkpoint] 成功恢复至 Epoch {start_epoch} | 上次 Loss: {loss:.4f} | F1: {f1:.4f}")
+    print(f"[Checkpoint] restored at  Epoch {start_epoch} | 上次 Loss: {loss:.4f} | F1: {f1:.4f}")
     return model, optimizer, start_epoch, f1
 
 
 def load_model(filepath, model, device='cpu'):
     """
-    【推理/评估专用】加载模型权重。
-    优先加载 .safetensors，如果不存在则自动回退读取 .pt 权重。
+    [reason/evaluate] load model weight
+    load .safetensors firstly，read .pt weight if safetensor not exists
     
-    参数:
-        filepath: 模型路径或基础路径 (例如 "best_model.safetensors" 或 "best_model.pt")
-        model: 已初始化的 PyTorch 模型对象
-        device: 目标设备 ('cpu', 'cuda' 等)
+    param:
+        filepath: file path of directory path (i.e "best_model.safetensors" 或 "best_model.pt")
+        model:  PyTorch model which have been initialized
+        device: object device ('cpu', 'cuda' ...)
         
-    返回:
-        model (处于 model.eval() 状态)
+    return:
+        model ( model.eval() state)
     """
     base_path, _ = os.path.splitext(filepath)
     safetensors_path = base_path + ".safetensors"
@@ -76,19 +76,19 @@ def load_model(filepath, model, device='cpu'):
     
     # 优先寻找 .safetensors 加载
     if os.path.exists(safetensors_path):
-        print(f"[Model] 正在使用 Safetensors 加载模型权重: {safetensors_path}")
+        print(f"[Model] using Safetensors format to load weights: {safetensors_path}")
         st_load_model(model, safetensors_path)
     # 次选加载 .pt 中的权重
     elif os.path.exists(pt_path):
-        print(f"[Model] 未找到 Safetensors，回退使用 PyTorch .pt 加载: {pt_path}")
+        print(f"[Model] could not find Safetensors，draw back to  PyTorch .pt format: {pt_path}")
         checkpoint = torch.load(pt_path, map_location=device)
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         model.load_state_dict(state_dict)
     else:
-        raise FileNotFoundError(f"未找到对应的权重文件 (.safetensors 或 .pt): {base_path}")
+        raise FileNotFoundError(f"could not find checkpoint of safetensors (.safetensors 或 .pt): {base_path}")
         
-    model.eval()  # 自动切换为评估模式
-    print(f"[Model] 模型权重加载完成，已就绪 (eval 模式)！")
+    model.eval()  # switch to eval
+    print(f"[Model] model weight loaded successfully，ready to eval！")
     return model    
 
 
@@ -198,7 +198,7 @@ def train_model_seq(model, dataloader, optimizer, criterion, device,focal=False)
             max_len = loss.size(1)
             
             t = torch.arange(max_len, device=loss.device).float().unsqueeze(0)  # [1, T]
-            # 用 sigmoid 函数生成权重，范围从 0.5 到 1.0
+            # using sigmoid to project val range to [0.5,1.0]
             weights = torch.sigmoid((t - max_len/2) / (max_len/6))  # [1, T]
             
             weights = weights.repeat(loss.size(0), 1)  # [B, T]
@@ -211,7 +211,7 @@ def train_model_seq(model, dataloader, optimizer, criterion, device,focal=False)
             #tail_weight = 2.0
             seq_weight = 1
 
-            # 头（第一个 token）是答案
+            # head（the first token）is the answer
             head_loss = criterion(logits[:, 0, :], targets[:, 0])
             seq_loss = criterion(logits[:, 1:, :].permute(0,2,1), targets[:, 1:])
 
@@ -286,18 +286,18 @@ def train_epoch_seq(model, dataloader, optimizer, criterion, device):
         output_ids = batch['output_ids'].to(device)
         out_len = batch['out_len']
         
-        # 直接传 output_ids，forward 内部会处理
+        # pass output_ids，forward function handle it
         logits = model(input_ids, output_ids)  # [B, T, vocab_size]
         targets = output_ids  # [B, T]
         
-       # 基础掩码：有效位置为 True
+       # basic mask： True at valid position
         mask = torch.arange(targets.size(1), device=device).unsqueeze(0) < out_len.unsqueeze(1)
 
-        # 构造权重矩阵：有效位置权重为 1，最后一个有效 token 权重为 out_len - 1
+        # construct weight matrix：1 at valid pos，the last token weight should be out_len - 1
         weight = mask.float()
         
         for i in range(targets.size(0)):
-            weight[i, out_len[i] - 1] = out_len[i] - 1  # 只对每个样本的最后一个有效 token 设置权重
+            weight[i, out_len[i] - 1] = out_len[i] - 1  # 
         
         loss = criterion(logits.permute(0, 2, 1), targets)
         loss = (loss * weight).sum() / weight.sum()

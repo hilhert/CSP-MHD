@@ -35,7 +35,7 @@ def main():
         epochs=300, lr=0.0001, device=device,loss_fn=focal_loss, cp_path=cp_path
     )
     
-    # ★★★ 绘图 ★★★
+    # ★★★ plot ★★★
     plot_training_curves_f1(losses, f1s,save_path=fig_path)
     plot_grokking_analysis_f1(f1s, grad_norms, losses,save_path=fig_path)
     #plot_gradient_norm()
